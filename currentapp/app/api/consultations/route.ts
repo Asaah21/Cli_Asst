@@ -1,0 +1,2 @@
+import {createClient} from "@/lib/supabase/server";import {NextResponse} from "next/server";
+export async function GET(){const s=await createClient();const {data:{claims}}=await s.auth.getClaims();if(!claims)return NextResponse.json({error:"Not authenticated"},{status:401});const {data,error}=await s.from("consultations").select("id,created_at,patient_input,assessment").eq("clinician_id",claims.sub).order("created_at",{ascending:false}).limit(30);return NextResponse.json({data,error});}
