@@ -1,5 +1,0 @@
-"use client";
-import {useState} from "react"; import {createClient} from "@/lib/supabase/client"; import {useRouter} from "next/navigation";
-export default function Login(){const [email,setEmail]=useState("");const [password,setPassword]=useState("");const [msg,setMsg]=useState("");const router=useRouter();
-async function go(){const s=createClient();const {error}=await s.auth.signInWithPassword({email,password});if(error)setMsg(error.message);else router.push("/");}
-return <main className="auth"><div className="card"><h1>Clinical Reference AI</h1><p>Clinician sign in</p><input placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)}/><input placeholder="Password" type="password" value={password} onChange={e=>setPassword(e.target.value)}/><button className="primary" onClick={go}>Sign in</button>{msg&&<p className="error">{msg}</p>}</div></main>}
