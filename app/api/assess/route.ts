@@ -1,6 +1,20 @@
 import { NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@/lib/supabase/server";
+import {
+  clean,
+  scoreText,
+  generateJson,
+  getModels,
+  isQuotaError,
+  Plan,
+  planSchema,
+  TREATMENT_STRUCTURE_RULES,
+  EXTENDED_INFO_RULES,
+  SOURCE_RULES,
+  ConditionRecord,
+  MedicationRecord,
+} from "@/lib/clinical/shared";
 
 type PatientInput = {
   age?: number | null;
@@ -61,14 +75,7 @@ type FinalAssessment = {
     reason: string;
     priority: string;
   }>;
-  plans: Array<{
-    condition: string;
-    b2: string[];
-    c: string[];
-    alternatives: string[];
-    contraindications: string[];
-    notes: string[];
-  }>;
+  plans: Plan[];
   disposition: string;
   source_notes: string[];
 };
@@ -199,41 +206,7 @@ const finalSchema = {
     },
     plans: {
       type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: [
-          "condition",
-          "b2",
-          "c",
-          "alternatives",
-          "contraindications",
-          "notes",
-        ],
-        properties: {
-          condition: { type: "string" },
-          b2: {
-            type: "array",
-            items: { type: "string" },
-          },
-          c: {
-            type: "array",
-            items: { type: "string" },
-          },
-          alternatives: {
-            type: "array",
-            items: { type: "string" },
-          },
-          contraindications: {
-            type: "array",
-            items: { type: "string" },
-          },
-          notes: {
-            type: "array",
-            items: { type: "string" },
-          },
-        },
-      },
+      items: planSchema,
     },
     disposition: { type: "string" },
     source_notes: {
@@ -242,114 +215,6 @@ const finalSchema = {
     },
   },
 };
-
-const clean = (value: unknown) =>
-  String(value ?? "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-const tokens = (value: unknown): string[] =>
-  [
-    ...new Set(
-      clean(value)
-        .toLowerCase()
-        .replace(/[^a-z0-9\s-]/g, " ")
-        .split(/\s+/)
-        .filter((x) => x.length >= 4)
-    ),
-  ].slice(0, 80);
-
-const scoreText = (query: string, text: string) => {
-  const queryTerms = new Set(tokens(query));
-  const textTerms = new Set(tokens(text));
-
-  let score = 0;
-
-  for (const term of queryTerms) {
-    if (textTerms.has(term)) score++;
-  }
-
-  return score;
-};
-
-const sleep = (ms: number) =>
-  new Promise((resolve) => setTimeout(resolve, ms));
-
-function errorStatus(error: unknown): number | null {
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "status" in error
-  ) {
-    const status = (error as { status?: unknown }).status;
-
-    if (typeof status === "number") return status;
-  }
-
-  return null;
-}
-
-function isQuotaError(error: unknown) {
-  return errorStatus(error) === 429;
-}
-
-function isTemporaryError(error: unknown) {
-  const status = errorStatus(error);
-  return status === 500 || status === 503;
-}
-
-async function generateJson<T>(
-  ai: GoogleGenAI,
-  model: string,
-  schema: unknown,
-  prompt: string
-): Promise<T> {
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      console.log(
-        `[Gemini] ${model} attempt ${attempt}/2`
-      );
-
-      const response = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: schema,
-        },
-      });
-
-      if (!response.text) {
-        throw new Error("Gemini returned an empty response.");
-      }
-
-      return JSON.parse(response.text) as T;
-    } catch (error) {
-      lastError = error;
-
-      console.error(
-        `[Gemini] ${model} attempt ${attempt} failed:`,
-        error
-      );
-
-      if (isQuotaError(error)) {
-        throw error;
-      }
-
-      if (!isTemporaryError(error)) {
-        throw error;
-      }
-
-      if (attempt === 1) {
-        await sleep(2000);
-      }
-    }
-  }
-
-  throw lastError;
-}
 
 function buildPatientText(patient: PatientInput) {
   return [
@@ -377,7 +242,7 @@ function buildPatientText(patient: PatientInput) {
 
 function localConditionFallback(
   patient: PatientInput,
-  conditions: any[]
+  conditions: ConditionRecord[]
 ): FinalAssessment {
   const patientText = buildPatientText(patient);
 
@@ -424,22 +289,36 @@ function localConditionFallback(
     tests: ranked
       .slice(0, 4)
       .flatMap((item) => {
-        const investigation = clean(
-          item.condition.investigations
-        );
+        const investigation = clean(item.condition.investigations);
 
         return investigation
           ? [
               {
                 test: investigation,
-                reason:
-                  "Investigation listed in the supplied STG record.",
+                reason: "Investigation listed in the supplied STG record.",
                 priority: "Consider",
               },
             ]
           : [];
       }),
-    plans: [],
+    plans: ranked.slice(0, 4).map((item) => ({
+      condition: item.condition.condition,
+      lines: item.condition.treatment
+        ? [
+            {
+              label: "From STG record",
+              order: 1,
+              regimens: [clean(item.condition.treatment)],
+              when_to_use: "AI grounding was unavailable; this is the raw STG treatment text for clinician review.",
+            },
+          ]
+        : [],
+      alternatives: [],
+      contraindications: [],
+      cautions: [],
+      monitoring: [],
+      extended_info: [],
+    })),
     disposition:
       "Use the applicable current Ghana guideline and clinician assessment. AI is unavailable.",
     source_notes: [
@@ -458,38 +337,20 @@ export async function POST(req: Request) {
     } = await supabase.auth.getUser();
 
     if (!user) {
-      return NextResponse.json(
-        { error: "Not authenticated" },
-        { status: 401 }
-      );
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
-    const patient =
-      (await req.json()) as PatientInput;
+    const patient = (await req.json()) as PatientInput;
 
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
-      return NextResponse.json(
-        {
-          error:
-            "GEMINI_API_KEY is missing.",
-        },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: "GEMINI_API_KEY is missing." }, { status: 500 });
     }
 
-    const primaryModel =
-      process.env.GEMINI_MODEL ||
-      "gemini-3.5-flash-lite";
+    const { primaryModel, fallbackModel } = getModels();
 
-    const fallbackModel =
-      process.env.GEMINI_FALLBACK_MODEL ||
-      "gemini-3.1-flash-lite";
-
-    const ai = new GoogleGenAI({
-      apiKey,
-    });
+    const ai = new GoogleGenAI({ apiKey });
 
     const patientText = buildPatientText(patient);
 
@@ -497,10 +358,7 @@ export async function POST(req: Request) {
     // 1. Get the structured clinical reference data from Supabase
     // ---------------------------------------------------------
 
-    const {
-      data: allConditions,
-      error: conditionError,
-    } = await supabase
+    const { data: allConditions, error: conditionError } = await supabase
       .from("conditions")
       .select(
         [
@@ -521,38 +379,13 @@ export async function POST(req: Request) {
       .limit(500);
 
     if (conditionError) {
-      return NextResponse.json(
-        { error: conditionError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: conditionError.message }, { status: 500 });
     }
 
-    const conditions = allConditions ?? [];
+    const conditions = (allConditions ?? []) as unknown as ConditionRecord[];
 
     // ---------------------------------------------------------
-    // 2. Rank STG conditions locally
-    //    This avoids sending all 402 records to Gemini.
-    // ---------------------------------------------------------
-
-    const rankedConditions = conditions
-      .map((condition: any) => ({
-        condition,
-        score: scoreText(
-          patientText,
-          [
-            condition.condition,
-            condition.symptoms,
-            condition.signs,
-            condition.investigations,
-            condition.treatment,
-          ].join(" ")
-        ),
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 10);
-
-    // ---------------------------------------------------------
-    // 3. Stage 1: AI clinical reasoning
+    // 2. Stage 1: AI clinical reasoning
     // ---------------------------------------------------------
 
     let stage1: Stage1Assessment;
@@ -604,63 +437,36 @@ ${patientText}
 `;
 
     try {
-      stage1 = await generateJson<Stage1Assessment>(
-        ai,
-        primaryModel,
-        stage1Schema,
-        stage1Prompt
-      );
+      stage1 = await generateJson<Stage1Assessment>(ai, primaryModel, stage1Schema, stage1Prompt);
     } catch (primaryError) {
-      console.error(
-        "[Gemini] Stage 1 primary failed:",
-        primaryError
-      );
+      console.error("[Gemini] Stage 1 primary failed:", primaryError);
 
       if (isQuotaError(primaryError)) {
-        stage1 = localConditionFallback(
-          patient,
-          conditions
-        ) as unknown as Stage1Assessment;
+        stage1 = localConditionFallback(patient, conditions) as unknown as Stage1Assessment;
       } else {
         try {
-          stage1 = await generateJson<Stage1Assessment>(
-            ai,
-            fallbackModel,
-            stage1Schema,
-            stage1Prompt
-          );
+          stage1 = await generateJson<Stage1Assessment>(ai, fallbackModel, stage1Schema, stage1Prompt);
         } catch (fallbackError) {
-          console.error(
-            "[Gemini] Stage 1 fallback failed:",
-            fallbackError
-          );
+          console.error("[Gemini] Stage 1 fallback failed:", fallbackError);
 
-          stage1 = localConditionFallback(
-            patient,
-            conditions
-          ) as unknown as Stage1Assessment;
+          stage1 = localConditionFallback(patient, conditions) as unknown as Stage1Assessment;
         }
       }
     }
 
     // ---------------------------------------------------------
-    // 4. Match stage-1 diagnoses against STG records
+    // 3. Match stage-1 diagnoses against STG records
     // ---------------------------------------------------------
 
-    const diagnosisTerms = (
-      stage1.possible_diagnoses ?? []
-    ).flatMap((item) => [
+    const diagnosisTerms = (stage1.possible_diagnoses ?? []).flatMap((item) => [
       item.condition,
       ...(item.supporting_findings ?? []),
     ]);
 
-    const expandedSearchText = [
-      patientText,
-      ...diagnosisTerms,
-    ].join(" ");
+    const expandedSearchText = [patientText, ...diagnosisTerms].join(" ");
 
     const finalConditions = conditions
-      .map((condition: any) => ({
+      .map((condition) => ({
         condition,
         score: scoreText(
           expandedSearchText,
@@ -679,13 +485,10 @@ ${patientText}
       .map((item) => item.condition);
 
     // ---------------------------------------------------------
-    // 5. Get medication database and rank B2/C medicines locally
+    // 4. Get medication database and rank medicines locally
     // ---------------------------------------------------------
 
-    const {
-      data: allMedications,
-      error: medicationError,
-    } = await supabase
+    const { data: allMedications, error: medicationError } = await supabase
       .from("medications")
       .select(
         [
@@ -703,37 +506,23 @@ ${patientText}
       .limit(1000);
 
     if (medicationError) {
-      return NextResponse.json(
-        { error: medicationError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: medicationError.message }, { status: 500 });
     }
 
-    const medications = allMedications ?? [];
+    const medications = (allMedications ?? []) as unknown as MedicationRecord[];
 
     const medicationSearchText = [
-      ...(stage1.possible_diagnoses ?? []).map(
-        (x) => x.condition
-      ),
-      ...finalConditions.map(
-        (x: any) => x.condition
-      ),
-      ...finalConditions.map(
-        (x: any) => x.treatment
-      ),
+      ...(stage1.possible_diagnoses ?? []).map((x) => x.condition),
+      ...finalConditions.map((x) => x.condition),
+      ...finalConditions.map((x) => x.treatment),
     ].join(" ");
 
     const relevantMedications = medications
-      .map((medication: any) => ({
+      .map((medication) => ({
         medication,
         score: scoreText(
           medicationSearchText,
-          [
-            medication.drug,
-            medication.formulation,
-            medication.strength,
-            medication.category,
-          ].join(" ")
+          [medication.drug, medication.formulation, medication.strength, medication.category].join(" ")
         ),
       }))
       .filter((x) => x.score > 0)
@@ -742,51 +531,36 @@ ${patientText}
       .map((x) => x.medication);
 
     // ---------------------------------------------------------
-    // 6. Evidence text kept deliberately small
+    // 5. Evidence text kept deliberately small
     // ---------------------------------------------------------
 
-    const conditionEvidence = finalConditions
-      .map(
-        (c: any) => ({
-          id: c.id,
-          condition: c.condition,
-          symptoms: c.symptoms,
-          signs: c.signs,
-          investigations: c.investigations,
-          treatment: c.treatment,
-          referral_criteria: c.referral_criteria,
-          source_pages: c.source_pages,
-        })
-      );
+    const conditionEvidence = finalConditions.map((c) => ({
+      id: c.id,
+      condition: c.condition,
+      symptoms: c.symptoms,
+      signs: c.signs,
+      investigations: c.investigations,
+      treatment: c.treatment,
+      referral_criteria: c.referral_criteria,
+      source_pages: c.source_pages,
+    }));
 
     // ---------------------------------------------------------
-    // 7. Stage 2: evidence-grounded treatment reasoning
+    // 6. Stage 2: evidence-grounded treatment reasoning
     // ---------------------------------------------------------
 
     const stage2Prompt = `
 You are the evidence-grounding stage of a clinical decision-support application for a Ghanaian health facility.
 
-FACILITY:
-- Facility level: C
-- Preferred working level: B2
-- Both B2 and C treatment options must be shown when supported.
-- Facility observation is normally up to 24 hours, but this is an operational constraint and NOT a clinical treatment rule.
-
-CRITICAL SOURCE RULES:
-- Use the supplied STG records as the primary source for treatment, investigation and referral information.
-- Use the supplied EML records for medication availability/level.
-- Never invent a medicine, dose, route, frequency, duration, indication, contraindication or referral criterion.
-- If the supplied source does not contain enough information, say: "Verify in the current official Ghana STG/EML."
-- Clearly distinguish probable diagnoses from confirmed diagnoses.
+FACILITY CONTEXT:
+- Facility level: C (a facility that prefers B2-level options when they are adequate).
+- Facility observation is normally up to 24 hours; this is an operational constraint and NOT a clinical treatment rule.
+${TREATMENT_STRUCTURE_RULES}
+${SOURCE_RULES}
 - Do not automatically turn a negative test into a diagnosis.
-- Flag emergencies, pregnancy concerns, severe disease and dangerous vital-sign abnormalities.
 - Ask only useful questions that can change the assessment.
 - Recommend only useful/simple tests relevant to the differential.
-- B2 must appear before C.
-- C-level options must remain visible where clinically relevant.
-- A C-level medicine is not automatically a reason to refer.
-- Do not fabricate patient-specific dose calculations.
-- Current official Ghana guidance may supersede older supplied material; state when verification is needed.
+${EXTENDED_INFO_RULES}
 
 PATIENT:
 ${patientText}
@@ -797,7 +571,7 @@ ${JSON.stringify(stage1)}
 RELEVANT STG RECORDS:
 ${JSON.stringify(conditionEvidence)}
 
-RELEVANT B2/C MEDICATION RECORDS:
+RELEVANT MEDICATION RECORDS (with level_of_care available only as background context):
 ${JSON.stringify(relevantMedications)}
 
 Return the structured result.
@@ -807,34 +581,16 @@ Return the structured result.
     let aiModelUsed = primaryModel;
 
     try {
-      finalAssessment =
-        await generateJson<FinalAssessment>(
-          ai,
-          primaryModel,
-          finalSchema,
-          stage2Prompt
-        );
+      finalAssessment = await generateJson<FinalAssessment>(ai, primaryModel, finalSchema, stage2Prompt);
     } catch (primaryError) {
-      console.error(
-        "[Gemini] Stage 2 primary failed:",
-        primaryError
-      );
+      console.error("[Gemini] Stage 2 primary failed:", primaryError);
 
       try {
-        finalAssessment =
-          await generateJson<FinalAssessment>(
-            ai,
-            fallbackModel,
-            finalSchema,
-            stage2Prompt
-          );
+        finalAssessment = await generateJson<FinalAssessment>(ai, fallbackModel, finalSchema, stage2Prompt);
 
         aiModelUsed = fallbackModel;
       } catch (fallbackError) {
-        console.error(
-          "[Gemini] Stage 2 fallback failed:",
-          fallbackError
-        );
+        console.error("[Gemini] Stage 2 fallback failed:", fallbackError);
 
         // Safe reference-only fallback.
         finalAssessment = {
@@ -843,17 +599,31 @@ Return the structured result.
           urgency: stage1.urgency || "Clinician review required",
           red_flags: stage1.red_flags || [],
           questions: stage1.questions || [],
-          possible_diagnoses: (
-            stage1.possible_diagnoses || []
-          ).map((item) => ({
+          possible_diagnoses: (stage1.possible_diagnoses || []).map((item) => ({
             condition: item.condition,
             confidence: item.likelihood,
             why: item.supporting_findings.join("; "),
           })),
           tests: stage1.tests || [],
-          plans: [],
-          disposition:
-            "Use the applicable current official Ghana guideline and clinician assessment.",
+          plans: conditionEvidence.slice(0, 4).map((c) => ({
+            condition: c.condition,
+            lines: c.treatment
+              ? [
+                  {
+                    label: "From STG record",
+                    order: 1,
+                    regimens: [clean(c.treatment)],
+                    when_to_use: "AI grounding was unavailable; this is the raw STG treatment text for clinician review.",
+                  },
+                ]
+              : [],
+            alternatives: [],
+            contraindications: [],
+            cautions: [],
+            monitoring: [],
+            extended_info: [],
+          })),
+          disposition: "Use the applicable current official Ghana guideline and clinician assessment.",
           source_notes: [
             "AI treatment reasoning was unavailable.",
             "Review the retrieved STG/EML evidence before prescribing.",
@@ -865,11 +635,11 @@ Return the structured result.
     }
 
     // ---------------------------------------------------------
-    // 8. Save consultation using your ACTUAL schema
+    // 7. Save consultation using your ACTUAL schema
     // ---------------------------------------------------------
 
     const sourceConditionIds = finalConditions
-      .map((c: any) => c.id)
+      .map((c) => c.id)
       .filter((id: unknown) => id !== null && id !== undefined);
 
     const assessmentToSave = {
@@ -879,25 +649,21 @@ Return the structured result.
       reference_medications: relevantMedications,
     };
 
-    const { data: consultation, error: saveError } =
-      await supabase
-        .from("consultations")
-        .insert({
-          clinician_id: user.id,
-          patient_input: patient,
-          patient_data: patient,
-          assessment: assessmentToSave,
-          source_condition_ids: sourceConditionIds,
-          ai_model: aiModelUsed,
-        })
-        .select("id")
-        .single();
+    const { data: consultation, error: saveError } = await supabase
+      .from("consultations")
+      .insert({
+        clinician_id: user.id,
+        patient_input: patient,
+        patient_data: patient,
+        assessment: assessmentToSave,
+        source_condition_ids: sourceConditionIds,
+        ai_model: aiModelUsed,
+      })
+      .select("id")
+      .single();
 
     if (saveError) {
-      console.error(
-        "Consultation save error:",
-        saveError
-      );
+      console.error("Consultation save error:", saveError);
     }
 
     return NextResponse.json({
@@ -905,6 +671,10 @@ Return the structured result.
       reasoning: stage1,
       source_conditions: conditionEvidence,
       source_medications: relevantMedications,
+      evidence: {
+        conditions: conditionEvidence,
+        medications: relevantMedications,
+      },
       consultationId: consultation?.id ?? null,
       aiModel: aiModelUsed,
     });
@@ -913,10 +683,7 @@ Return the structured result.
 
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Assessment failed",
+        error: error instanceof Error ? error.message : "Assessment failed",
       },
       { status: 500 }
     );
