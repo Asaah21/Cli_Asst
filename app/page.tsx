@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import AssessmentForm from "@/components/AssessmentForm";
 import TreatmentLookup from "@/components/TreatmentLookup";
+import DrugLookup from "@/components/DrugLookup";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,10 @@ export default async function Home() {
           <button className="ghost">Sign out</button>
         </form>
       </header>
-      <TreatmentLookup />
+      <div className="lookupRow">
+        <TreatmentLookup />
+        <DrugLookup />
+      </div>
       <AssessmentForm />
     </main>
   );

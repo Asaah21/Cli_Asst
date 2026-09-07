@@ -23,6 +23,8 @@ button.diagnosisCard:disabled{cursor:default}
 .extendedInfoBlock{margin-top:14px;border-top:1px solid #e6ebef;padding-top:12px}
 .extendedInfoPanel{margin-top:10px;background:#f6f4ff;border:1px solid #e2dcfb;border-radius:9px;padding:12px}
 .extendedInfoNotice{margin:0 0 8px;font-style:italic}
+.lookupRow{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px;align-items:start}
+.lookupRow .lookupCard{margin-bottom:0}
 .lookupCard{padding:22px;margin-bottom:18px}
 .lookupResult{margin-top:20px;padding-top:18px;border-top:1px solid #e6ebef;display:flex;flex-direction:column;gap:14px}
 .lookupOverview h3{margin:0 0 6px;font-size:19px}
@@ -30,4 +32,4 @@ button.diagnosisCard:disabled{cursor:default}
 .relatedConditions h5{margin:0 0 8px;font-size:12px}
 .tagRow{display:flex;flex-wrap:wrap;gap:7px}
 .sourceNotesList{color:#64748b;font-size:12px}
-@media(max-width:980px){.formGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.treatmentColumns,.evidencePanel{grid-template-columns:1fr}}@media(max-width:640px){main{padding:12px}.top,.cardHeader,.resultHero{flex-direction:column;align-items:stretch}.formGrid{grid-template-columns:1fr}.miniGrid{grid-template-columns:1fr}.settingPills{justify-content:flex-start}.actionRow,.questionFooter{flex-wrap:wrap}.resultSection{padding:17px}.treatmentCardHeader{padding:11px}.treatmentCardBody{padding:0 11px 11px}}
+@media(max-width:980px){.formGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.treatmentColumns,.evidencePanel{grid-template-columns:1fr}.lookupRow{grid-template-columns:1fr}}@media(max-width:640px){main{padding:12px}.top,.cardHeader,.resultHero{flex-direction:column;align-items:stretch}.formGrid{grid-template-columns:1fr}.miniGrid{grid-template-columns:1fr}.settingPills{justify-content:flex-start}.actionRow,.questionFooter{flex-wrap:wrap}.resultSection{padding:17px}.treatmentCardHeader{padding:11px}.treatmentCardBody{padding:0 11px 11px}}
