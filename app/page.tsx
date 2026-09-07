@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import AssessmentForm from "@/components/AssessmentForm";
+import TreatmentLookup from "@/components/TreatmentLookup";
+import DrugLookup from "@/components/DrugLookup";
 
 export const dynamic = "force-dynamic";
 
@@ -14,12 +16,16 @@ export default async function Home() {
       <header className="top">
         <div>
           <h1>Clinical Reference AI</h1>
-          <p>Ghana STG + EML · Facility C · B2 preferred · C options included</p>
+          <p>Ghana STG + EML · Facility C · treatment organized by line (1st, 2nd, 3rd...)</p>
         </div>
         <form action="/auth/signout" method="post">
           <button className="ghost">Sign out</button>
         </form>
       </header>
+      <div className="lookupRow">
+        <TreatmentLookup />
+        <DrugLookup />
+      </div>
       <AssessmentForm />
     </main>
   );

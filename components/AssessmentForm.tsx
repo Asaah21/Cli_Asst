@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { TreatmentPlan, Plan, slugify } from "@/components/TreatmentPlan";
 
 type Diagnosis = {
   condition: string;
-  likelihood: string;
+  confidence: string;
   why: string;
 };
 
@@ -12,16 +13,6 @@ type TestRecommendation = {
   test: string;
   reason: string;
   priority: string;
-};
-
-type Plan = {
-  condition: string;
-  b2: string[];
-  c: string[];
-  alternatives: string[];
-  contraindications: string[];
-  cautions: string[];
-  monitoring: string[];
 };
 
 type Result = {
@@ -106,6 +97,21 @@ function Tag({ children, kind = "neutral" }: any) {
   return <span className={`tag ${kind}`}>{children}</span>;
 }
 
+function findPlanForCondition(conditionName: string, plans: Plan[]): Plan | null {
+  if (!plans?.length) return null;
+  const targetSlug = slugify(conditionName);
+  const exact = plans.find((plan) => slugify(plan.condition) === targetSlug);
+  if (exact) return exact;
+
+  const lowerTarget = conditionName.toLowerCase();
+  const fuzzy = plans.find(
+    (plan) =>
+      plan.condition.toLowerCase().includes(lowerTarget) ||
+      lowerTarget.includes(plan.condition.toLowerCase())
+  );
+  return fuzzy ?? null;
+}
+
 export default function AssessmentForm() {
   const [form, setForm] = useState<any>(initialForm);
   const [result, setResult] = useState<Result | null>(null);
@@ -114,8 +120,35 @@ export default function AssessmentForm() {
   const [error, setError] = useState("");
   const [questionAnswers, setQuestionAnswers] = useState<Record<number, string>>({});
   const [showEvidence, setShowEvidence] = useState(false);
+  const [openPlans, setOpenPlans] = useState<Set<string>>(new Set());
+  const [highlightedPlan, setHighlightedPlan] = useState<string | null>(null);
+  const planRefs = useRef<Record<string, HTMLElement | null>>({});
 
   const set = (key: string, value: string) => setForm((current: any) => ({ ...current, [key]: value }));
+
+  function togglePlan(key: string) {
+    setOpenPlans((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function jumpToTreatment(conditionName: string) {
+    const plan = findPlanForCondition(conditionName, result?.plans ?? []);
+    if (!plan) return;
+
+    const key = slugify(plan.condition);
+    setOpenPlans((current) => new Set(current).add(key));
+    setHighlightedPlan(key);
+
+    window.setTimeout(() => {
+      planRefs.current[key]?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 60);
+
+    window.setTimeout(() => setHighlightedPlan((current) => (current === key ? null : current)), 2200);
+  }
 
   const filledQuestionCount = useMemo(
     () => Object.values(questionAnswers).filter((value) => value.trim()).length,
@@ -163,6 +196,8 @@ export default function AssessmentForm() {
     setEvidence(null);
     setError("");
     setQuestionAnswers({});
+    setOpenPlans(new Set());
+    setHighlightedPlan(null);
   }
 
   return (
@@ -178,8 +213,7 @@ export default function AssessmentForm() {
           </div>
           <div className="settingPills">
             <Tag kind="facility">Facility C</Tag>
-            <Tag kind="b2">B2 preferred</Tag>
-            <Tag kind="c">C options included</Tag>
+            <Tag kind="b2">Treatment shown by line: 1st, 2nd, 3rd...</Tag>
           </div>
         </div>
 
@@ -264,20 +298,30 @@ export default function AssessmentForm() {
             </Section>
           )}
 
-          <Section title="Possible diagnoses" description="Ranked possibilities, not confirmed diagnoses.">
+          <Section title="Possible diagnoses" description="Ranked possibilities, not confirmed diagnoses. Click one to jump to its treatment.">
             <div className="diagnosisList">
-              {result.possible_diagnoses?.map((item, i) => (
-                <article className="diagnosisCard" key={`${item.condition}-${i}`}>
-                  <div className="diagnosisTop">
-                    <div className="diagnosisIndex">{i + 1}</div>
-                    <div>
-                      <h4>{item.condition}</h4>
-                      <Tag kind={item.likelihood?.toLowerCase() === "high" ? "high" : item.likelihood?.toLowerCase() === "moderate" ? "moderate" : "low"}>{item.likelihood}</Tag>
+              {result.possible_diagnoses?.map((item, i) => {
+                const hasPlan = !!findPlanForCondition(item.condition, result.plans ?? []);
+                return (
+                  <button
+                    type="button"
+                    className={`diagnosisCard ${hasPlan ? "clickable" : ""}`}
+                    key={`${item.condition}-${i}`}
+                    onClick={() => hasPlan && jumpToTreatment(item.condition)}
+                    disabled={!hasPlan}
+                  >
+                    <div className="diagnosisTop">
+                      <div className="diagnosisIndex">{i + 1}</div>
+                      <div>
+                        <h4>{item.condition}</h4>
+                        <Tag kind={item.confidence?.toLowerCase() === "high" ? "high" : item.confidence?.toLowerCase() === "moderate" ? "moderate" : "low"}>{item.confidence}</Tag>
+                      </div>
                     </div>
-                  </div>
-                  <p>{item.why}</p>
-                </article>
-              ))}
+                    <p>{item.why}</p>
+                    {hasPlan && <span className="diagnosisLink">View treatment ↓</span>}
+                  </button>
+                );
+              })}
             </div>
           </Section>
 
@@ -332,29 +376,26 @@ export default function AssessmentForm() {
             </Section>
           )}
 
-          <Section title="Treatment plan" description="B2 is shown first. C-level options remain visible separately when supported by the supplied EML/STG evidence.">
+          <Section title="Treatment plan" description="Organized by treatment line (1st, 2nd, 3rd...), not facility level. Click a condition to expand or collapse its treatment.">
             <div className="treatmentList">
-              {result.plans?.map((plan, i) => (
-                <article className="treatmentCard" key={`${plan.condition}-${i}`}>
-                  <h4>{plan.condition}</h4>
-                  <div className="treatmentColumns">
-                    <div className="treatmentBox b2Box">
-                      <div className="treatmentLabel">B2</div>
-                      {plan.b2?.length ? <ul className="cleanList">{plan.b2.map((item, j) => <li key={j}>{item}</li>)}</ul> : <p className="muted">No supported B2 option retrieved.</p>}
-                    </div>
-                    <div className="treatmentBox cBox">
-                      <div className="treatmentLabel">C level</div>
-                      {plan.c?.length ? <ul className="cleanList">{plan.c.map((item, j) => <li key={j}>{item}</li>)}</ul> : <p className="muted">No supported C-level option retrieved.</p>}
-                    </div>
-                  </div>
-                  <div className="miniGrid">
-                    {plan.alternatives?.length > 0 && <div><h5>Alternatives</h5><ul className="cleanList">{plan.alternatives.map((item, j) => <li key={j}>{item}</li>)}</ul></div>}
-                    {plan.contraindications?.length > 0 && <div><h5>Contraindications</h5><ul className="cleanList">{plan.contraindications.map((item, j) => <li key={j}>{item}</li>)}</ul></div>}
-                    {plan.cautions?.length > 0 && <div><h5>Cautions</h5><ul className="cleanList">{plan.cautions.map((item, j) => <li key={j}>{item}</li>)}</ul></div>}
-                    {plan.monitoring?.length > 0 && <div><h5>Monitoring</h5><ul className="cleanList">{plan.monitoring.map((item, j) => <li key={j}>{item}</li>)}</ul></div>}
-                  </div>
-                </article>
-              ))}
+              {result.plans?.map((plan, i) => {
+                const key = slugify(plan.condition);
+                return (
+                  <TreatmentPlan
+                    key={`${plan.condition}-${i}`}
+                    plan={plan}
+                    open={openPlans.has(key)}
+                    onToggle={() => togglePlan(key)}
+                    highlighted={highlightedPlan === key}
+                    ref={(el) => {
+                      planRefs.current[key] = el;
+                    }}
+                  />
+                );
+              })}
+              {!result.plans?.length && (
+                <p className="muted">No treatment plan was returned for this assessment.</p>
+              )}
             </div>
           </Section>
 
