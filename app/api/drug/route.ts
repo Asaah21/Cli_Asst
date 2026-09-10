@@ -26,6 +26,7 @@ type DrugDose = {
   route: string;
   frequency: string;
   duration: string;
+  source: string;
 };
 
 type DrugLookupResult = {
@@ -54,13 +55,14 @@ const formSchema = {
 const doseSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["indication", "dose", "route", "frequency", "duration"],
+  required: ["indication", "dose", "route", "frequency", "duration", "source"],
   properties: {
     indication: { type: "string" },
     dose: { type: "string" },
     route: { type: "string" },
     frequency: { type: "string" },
     duration: { type: "string" },
+    source: { type: "string" },
   },
 };
 
@@ -191,17 +193,19 @@ You are a clinical decision-support assistant for a Ghanaian health facility.
 
 A clinician has typed a drug name directly and wants a quick reference: what it is, what forms/strengths are available, and how it is typically dosed.
 
-CRITICAL SOURCE RULES:
-- The supplied EML records are the source of truth for which formulations, strengths and levels of care are actually stocked/available. Use them for "forms". If a formulation/strength is not in the supplied records, do not claim it is stocked, but you may still mention it exists generally.
-- The supplied EML records do NOT contain dosing schedules (no dose amount, route, frequency or duration column). Populate "dosages" from well-established standard clinical dosing practice for that exact drug/formulation, and always add a note to "source_notes" that dosing is standard reference dosing, not from the supplied EML extract, and must be verified against the current EML/manufacturer information and local protocols before prescribing.
-- If the named drug does not closely match any supplied EML record, use your general knowledge to still answer helpfully, and say plainly in "overview" that it was not found in the supplied EML extract.
-- Never state a specific patient's dose; give standard adult (and, if relevant, standard pediatric/pregnancy caution) dosing ranges only.
+CLINICAL GROUNDING RULES:
+- The supplied EML records are the first reference for which formulations, strengths and levels of care are actually stocked locally — use them for "forms" when present. If a formulation/strength isn't in the supplied records, don't claim it's locally stocked, but still mention it if it's a real, commonly used form.
+- The supplied EML records do NOT contain dosing schedules. Populate "dosages" fully from well-established standard clinical dosing practice for that exact drug — do not hold back or say dosing is unavailable.
+- Where genuinely different dosing approaches exist (e.g. a shorter higher-dose course vs. a longer standard course, single-dose vs. multi-day, adult vs. pediatric, an alternative from a different guideline tradition), give multiple entries in "dosages" rather than picking just one, and name the tradition/source each reflects in that entry's "source" field (e.g. "Ghana EML/standard practice", "WHO", "CDC/IDSA", "shorter-course option").
+- If the named drug does not closely match any supplied EML record, answer fully from general clinical knowledge anyway — say plainly in "overview" that it wasn't found in the supplied EML extract, but do not refuse or truncate the rest of the answer over that.
+- Never state a specific patient's dose calculation; give standard adult (and, if relevant, standard pediatric/pregnancy caution) dosing ranges only.
 - List genuine contraindications and cautions; do not fabricate ones not supported by the supplied records or well-established practice.
+- Do not pad every entry with "verify locally" — the app already shows one overall safety notice; give the most complete, directly usable answer you can.
 - "related_drugs" should list other supplied EML entries that are therapeutic alternatives or commonly confused/similarly named drugs, if any.
 
-EXTENDED CLINICAL KNOWLEDGE (beyond the supplied EML extract):
-- In "extended_info", add genuinely useful background beyond forms/dosing: drug class and mechanism of action, common indications, key side effects, important interactions, and patient counselling points.
-- Draw on your general medical knowledge for this section. It is supplementary education, not a source-verified prescription.
+EXTENDED CLINICAL KNOWLEDGE — LEARNING DEEP-DIVE (shown collapsed, expanded on click):
+- In "extended_info", give summarized, high-yield teaching bullets — one or two sentences each, not paragraphs: drug class and mechanism of action, common indications, key side effects, important interactions, and patient counselling points.
+- Draw on your general medical knowledge freely here. It is supplementary education, not a source-verified prescription.
 
 DRUG QUERY:
 ${drugQuery}

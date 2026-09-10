@@ -10,8 +10,9 @@ import {
   Plan,
   planSchema,
   TREATMENT_STRUCTURE_RULES,
+  REGIMEN_VARIANT_RULES,
   EXTENDED_INFO_RULES,
-  SOURCE_RULES,
+  CLINICAL_GROUNDING_RULES,
   ConditionRecord,
   MedicationRecord,
 } from "@/lib/clinical/shared";
@@ -313,6 +314,7 @@ function localConditionFallback(
             },
           ]
         : [],
+      regimen_variants: [],
       alternatives: [],
       contraindications: [],
       cautions: [],
@@ -556,7 +558,8 @@ FACILITY CONTEXT:
 - Facility level: C (a facility that prefers B2-level options when they are adequate).
 - Facility observation is normally up to 24 hours; this is an operational constraint and NOT a clinical treatment rule.
 ${TREATMENT_STRUCTURE_RULES}
-${SOURCE_RULES}
+${REGIMEN_VARIANT_RULES}
+${CLINICAL_GROUNDING_RULES}
 - Do not automatically turn a negative test into a diagnosis.
 - Ask only useful questions that can change the assessment.
 - Recommend only useful/simple tests relevant to the differential.
@@ -617,6 +620,7 @@ Return the structured result.
                   },
                 ]
               : [],
+            regimen_variants: [],
             alternatives: [],
             contraindications: [],
             cautions: [],
