@@ -1,6 +1,7 @@
 "use client";
 
 import { forwardRef, useState } from "react";
+import MyProtocolNote from "@/components/MyProtocolNote";
 
 export type TreatmentLine = {
   label: string;
@@ -9,9 +10,16 @@ export type TreatmentLine = {
   when_to_use: string;
 };
 
+export type RegimenVariant = {
+  style: string;
+  regimens: string[];
+  rationale: string;
+};
+
 export type Plan = {
   condition: string;
   lines: TreatmentLine[];
+  regimen_variants?: RegimenVariant[];
   alternatives: string[];
   contraindications: string[];
   cautions: string[];
@@ -43,6 +51,7 @@ export const TreatmentPlan = forwardRef<
   }
 >(function TreatmentPlan({ plan, open, onToggle, highlighted }, ref) {
   const [showExtended, setShowExtended] = useState(false);
+  const [showProtocol, setShowProtocol] = useState(false);
 
   const sortedLines = [...(plan.lines ?? [])].sort((a, b) => a.order - b.order);
 
@@ -84,6 +93,27 @@ export const TreatmentPlan = forwardRef<
             </div>
           ) : (
             <p className="muted">No treatment lines retrieved for this condition.</p>
+          )}
+
+          {plan.regimen_variants && plan.regimen_variants.length > 0 && (
+            <div className="regimenVariants">
+              <h5>Alternative approaches</h5>
+              <div className="variantList">
+                {plan.regimen_variants.map((variant, i) => (
+                  <div className="variantBox" key={i}>
+                    <div className="variantStyle">{variant.style}</div>
+                    {variant.regimens?.length ? (
+                      <ul className="cleanList">
+                        {variant.regimens.map((item, j) => (
+                          <li key={j}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {variant.rationale && <p className="lineWhen">{variant.rationale}</p>}
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
 
           <div className="miniGrid">
@@ -136,12 +166,12 @@ export const TreatmentPlan = forwardRef<
                 className="textButton"
                 onClick={() => setShowExtended((v) => !v)}
               >
-                {showExtended ? "Hide" : "Show"} additional clinical background ({plan.extended_info.length})
+                {showExtended ? "Hide" : "Show"} learning deep-dive ({plan.extended_info.length})
               </button>
               {showExtended && (
                 <div className="extendedInfoPanel">
                   <p className="muted extendedInfoNotice">
-                    General medical knowledge beyond the supplied STG/EML excerpt — educational context only, verify locally before acting on it.
+                    General medical knowledge for learning/understanding — supplementary, not a source-verified prescription.
                   </p>
                   <ul className="cleanList">
                     {plan.extended_info.map((item, j) => (
@@ -152,6 +182,13 @@ export const TreatmentPlan = forwardRef<
               )}
             </div>
           )}
+
+          <div className="extendedInfoBlock">
+            <button type="button" className="textButton" onClick={() => setShowProtocol((v) => !v)}>
+              {showProtocol ? "Hide" : "Show"} my protocol
+            </button>
+            {showProtocol && <MyProtocolNote condition={plan.condition} />}
+          </div>
         </div>
       )}
     </article>

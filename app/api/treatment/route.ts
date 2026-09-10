@@ -10,8 +10,9 @@ import {
   Plan,
   planSchema,
   TREATMENT_STRUCTURE_RULES,
+  REGIMEN_VARIANT_RULES,
   EXTENDED_INFO_RULES,
-  SOURCE_RULES,
+  CLINICAL_GROUNDING_RULES,
   ConditionRecord,
   MedicationRecord,
 } from "@/lib/clinical/shared";
@@ -83,6 +84,7 @@ function localLookupFallback(
             },
           ]
         : [],
+      regimen_variants: [],
       alternatives: [],
       contraindications: [],
       cautions: [],
@@ -241,11 +243,10 @@ export async function POST(req: Request) {
     const prompt = `
 You are a clinical decision-support assistant for a Ghanaian health facility.
 
-A clinician has typed a condition/diagnosis directly and wants its treatment WITHOUT going through a full patient assessment first. Answer for the condition named, using the optional patient context only to flag relevant cautions (e.g. pregnancy, allergy, age-specific dosing notes) — do not re-diagnose the patient.
-
-If the named condition does not closely match any supplied STG record, use the closest reasonable match and say so in "overview", and list other close possibilities in "related_conditions".
+A clinician has typed a condition/diagnosis directly and wants its treatment WITHOUT going through a full patient assessment first. Answer for the condition actually named — do not substitute a "closest match" from the supplied records when the named condition is a real, specific diagnosis (e.g. a specific STI, a complicated UTI, a hypertensive emergency, a dog bite) that the local database simply doesn't carry; answer it properly from general clinical knowledge instead. Use the optional patient context only to flag relevant cautions (e.g. pregnancy, allergy, age-specific dosing notes) — do not re-diagnose the patient. Only fall back to a related "closest match" when the query is too vague or garbled to identify a real condition, and say so plainly in "overview". List genuinely related differentials or conditions worth distinguishing from in "related_conditions".
 ${TREATMENT_STRUCTURE_RULES}
-${SOURCE_RULES}
+${REGIMEN_VARIANT_RULES}
+${CLINICAL_GROUNDING_RULES}
 ${EXTENDED_INFO_RULES}
 
 REQUEST:

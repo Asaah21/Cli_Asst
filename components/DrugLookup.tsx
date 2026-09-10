@@ -14,6 +14,7 @@ type DrugDose = {
   route: string;
   frequency: string;
   duration: string;
+  source: string;
 };
 
 type DrugLookupResult = {
@@ -143,6 +144,7 @@ export default function DrugLookup() {
                         {dose.duration ? ` · ${dose.duration}` : ""}
                       </li>
                     </ul>
+                    {dose.source && <p className="lineWhen">Source: {dose.source}</p>}
                   </div>
                 ))}
               </div>
@@ -188,12 +190,12 @@ export default function DrugLookup() {
           {result.extended_info?.length > 0 && (
             <div className="extendedInfoBlock">
               <button type="button" className="textButton" onClick={() => setShowExtended((v) => !v)}>
-                {showExtended ? "Hide" : "Show"} additional clinical background ({result.extended_info.length})
+                {showExtended ? "Hide" : "Show"} learning deep-dive ({result.extended_info.length})
               </button>
               {showExtended && (
                 <div className="extendedInfoPanel">
                   <p className="muted extendedInfoNotice">
-                    General medical knowledge beyond the supplied EML excerpt — educational context only, verify locally before acting on it.
+                    General medical knowledge for learning/understanding — supplementary, not a source-verified prescription.
                   </p>
                   <ul className="cleanList">
                     {result.extended_info.map((item, i) => (
