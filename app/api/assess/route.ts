@@ -565,6 +565,9 @@ ${CLINICAL_GROUNDING_RULES}
 - Recommend only useful/simple tests relevant to the differential.
 ${EXTENDED_INFO_RULES}
 
+LINKING RULE (do not skip — the UI matches plans to diagnoses by this text):
+- Every entry in "possible_diagnoses" that has a treatment plan MUST have a "plans" entry whose "condition" field is copied character-for-character identical to that diagnosis's "condition" field. Do not paraphrase, reorder words, add/remove qualifiers like "suspected" or "uncomplicated", or otherwise vary the wording between the two.
+
 PATIENT:
 ${patientText}
 

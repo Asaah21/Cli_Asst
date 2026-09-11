@@ -97,6 +97,37 @@ function Tag({ children, kind = "neutral" }: any) {
   return <span className={`tag ${kind}`}>{children}</span>;
 }
 
+const CONDITION_STOPWORDS = new Set([
+  "suspected",
+  "possible",
+  "probable",
+  "confirmed",
+  "likely",
+  "acute",
+  "chronic",
+  "mild",
+  "moderate",
+  "severe",
+  "uncomplicated",
+  "complicated",
+  "early",
+  "late",
+  "recurrent",
+  "the",
+  "and",
+  "with",
+]);
+
+function coreTokens(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((word) => word.length > 2 && !CONDITION_STOPWORDS.has(word))
+  );
+}
+
 function findPlanForCondition(conditionName: string, plans: Plan[]): Plan | null {
   if (!plans?.length) return null;
   const targetSlug = slugify(conditionName);
@@ -104,12 +135,36 @@ function findPlanForCondition(conditionName: string, plans: Plan[]): Plan | null
   if (exact) return exact;
 
   const lowerTarget = conditionName.toLowerCase();
-  const fuzzy = plans.find(
+  const substring = plans.find(
     (plan) =>
       plan.condition.toLowerCase().includes(lowerTarget) ||
       lowerTarget.includes(plan.condition.toLowerCase())
   );
-  return fuzzy ?? null;
+  if (substring) return substring;
+
+  // Wording between the diagnosis list and the plan list can drift
+  // slightly (different qualifiers, word order). Fall back to core-word
+  // overlap so a plan still gets found and linked.
+  const targetTokens = coreTokens(conditionName);
+  if (!targetTokens.size) return null;
+
+  let best: { plan: Plan; score: number } | null = null;
+  for (const plan of plans) {
+    const planTokens = coreTokens(plan.condition);
+    if (!planTokens.size) continue;
+
+    let shared = 0;
+    for (const token of targetTokens) {
+      if (planTokens.has(token)) shared++;
+    }
+
+    const score = shared / Math.min(targetTokens.size, planTokens.size);
+    if (score > 0 && (!best || score > best.score)) {
+      best = { plan, score };
+    }
+  }
+
+  return best && best.score >= 0.5 ? best.plan : null;
 }
 
 export default function AssessmentForm() {
