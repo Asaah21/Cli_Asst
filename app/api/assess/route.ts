@@ -3,109 +3,94 @@ import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@/lib/supabase/server";
 import {
   clean,
-  scoreText,
   generateJson,
   getModels,
   isQuotaError,
-  Plan,
-  planSchema,
-  TREATMENT_STRUCTURE_RULES,
-  REGIMEN_VARIANT_RULES,
-  EXTENDED_INFO_RULES,
+  asConditionHits,
+  asMedicationHits,
+  termsFromText,
   CLINICAL_GROUNDING_RULES,
-  ConditionRecord,
-  MedicationRecord,
 } from "@/lib/clinical/shared";
+import { rxSchema, normalizeRxList, DOSE_RULE_PROMPT } from "@/lib/clinical/rx";
+import { computeDose } from "@/lib/clinical/dosing";
+import type { Rx, ComputedDose } from "@/lib/clinical/dosing";
+import { checkSafety } from "@/lib/clinical/safety-rules";
+import type { SafetyFlag } from "@/lib/clinical/safety-rules";
+import { buildPatientText } from "@/lib/types";
+import type { PatientInput } from "@/lib/types";
 
-type PatientInput = {
-  age?: number | null;
-  sex?: string;
-  weight?: number | null;
-  pregnancy?: string;
-  allergies?: string;
-  temp?: number | null;
-  bp?: string;
-  pulse?: number | null;
-  rr?: number | null;
-  spo2?: number | null;
-  rbs?: string;
-  hb?: string;
-  complaints?: string;
-  extra?: string;
-  tests?: string;
-  history?: string;
-  examination?: string;
-  signs?: string;
-  duration?: string;
-  facilityLevel?: "C";
-  preferredLevel?: "B2";
+type Stage1 = {
+  urgency: "Routine" | "Urgent" | "Emergency";
+  red_flags: string[];
+  symptoms_to_treat: string[];
+  candidates: { condition: string; likelihood: "High" | "Moderate" | "Low"; why: string }[];
+  search_terms: string[];
 };
 
-type Stage1Assessment = {
-  clinical_summary: string;
-  urgency: string;
-  red_flags: string[];
-  missing_information: string[];
-  possible_diagnoses: Array<{
-    condition: string;
-    likelihood: string;
-    supporting_findings: string[];
-    findings_against: string[];
-  }>;
-  questions: string[];
-  tests: Array<{
-    test: string;
-    reason: string;
-    priority: string;
-  }>;
-  immediate_actions: string[];
+type Stage2Card = {
+  condition: string;
+  likelihood: "High" | "Moderate" | "Low";
+  why: string;
+  first_line: unknown[];
+  alternative: unknown[];
+  adjuncts: unknown[];
+  non_drug: string[];
+  refer_if: string[];
+  source: string;
 };
 
-type FinalAssessment = {
-  summary: string;
-  urgency: string;
+type Stage2 = {
   red_flags: string[];
-  questions: string[];
-  possible_diagnoses: Array<{
-    condition: string;
-    why: string;
-    confidence: string;
-  }>;
-  tests: Array<{
-    test: string;
-    reason: string;
-    priority: string;
-  }>;
-  plans: Plan[];
-  disposition: string;
-  source_notes: string[];
+  diagnoses: Stage2Card[];
+};
+
+type ClientRx = Rx & { computed: ComputedDose };
+
+type DiagnosisCard = {
+  condition: string;
+  likelihood: "High" | "Moderate" | "Low";
+  why: string;
+  first_line: ClientRx[];
+  alternative: ClientRx[];
+  adjuncts: ClientRx[];
+  non_drug: string[];
+  refer_if: string[];
+  source: string;
+  safety_flags: SafetyFlag[];
 };
 
 const stage1Schema = {
   type: "object",
   additionalProperties: false,
-  required: [
-    "clinical_summary",
-    "urgency",
-    "red_flags",
-    "missing_information",
-    "possible_diagnoses",
-    "questions",
-    "tests",
-    "immediate_actions",
-  ],
+  required: ["urgency", "red_flags", "symptoms_to_treat", "candidates", "search_terms"],
   properties: {
-    clinical_summary: { type: "string" },
-    urgency: { type: "string" },
-    red_flags: {
+    urgency: { type: "string", enum: ["Routine", "Urgent", "Emergency"] },
+    red_flags: { type: "array", items: { type: "string" } },
+    symptoms_to_treat: { type: "array", items: { type: "string" } },
+    candidates: {
       type: "array",
-      items: { type: "string" },
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["condition", "likelihood", "why"],
+        properties: {
+          condition: { type: "string" },
+          likelihood: { type: "string", enum: ["High", "Moderate", "Low"] },
+          why: { type: "string" },
+        },
+      },
     },
-    missing_information: {
-      type: "array",
-      items: { type: "string" },
-    },
-    possible_diagnoses: {
+    search_terms: { type: "array", items: { type: "string" } },
+  },
+};
+
+const stage2Schema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["red_flags", "diagnoses"],
+  properties: {
+    red_flags: { type: "array", items: { type: "string" } },
+    diagnoses: {
       type: "array",
       items: {
         type: "object",
@@ -113,221 +98,51 @@ const stage1Schema = {
         required: [
           "condition",
           "likelihood",
-          "supporting_findings",
-          "findings_against",
+          "why",
+          "first_line",
+          "alternative",
+          "adjuncts",
+          "non_drug",
+          "refer_if",
+          "source",
         ],
         properties: {
           condition: { type: "string" },
-          likelihood: { type: "string" },
-          supporting_findings: {
-            type: "array",
-            items: { type: "string" },
-          },
-          findings_against: {
-            type: "array",
-            items: { type: "string" },
-          },
-        },
-      },
-    },
-    questions: {
-      type: "array",
-      items: { type: "string" },
-    },
-    tests: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["test", "reason", "priority"],
-        properties: {
-          test: { type: "string" },
-          reason: { type: "string" },
-          priority: { type: "string" },
-        },
-      },
-    },
-    immediate_actions: {
-      type: "array",
-      items: { type: "string" },
-    },
-  },
-};
-
-const finalSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: [
-    "summary",
-    "urgency",
-    "red_flags",
-    "questions",
-    "possible_diagnoses",
-    "tests",
-    "plans",
-    "disposition",
-    "source_notes",
-  ],
-  properties: {
-    summary: { type: "string" },
-    urgency: { type: "string" },
-    red_flags: {
-      type: "array",
-      items: { type: "string" },
-    },
-    questions: {
-      type: "array",
-      items: { type: "string" },
-    },
-    possible_diagnoses: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["condition", "why", "confidence"],
-        properties: {
-          condition: { type: "string" },
+          likelihood: { type: "string", enum: ["High", "Moderate", "Low"] },
           why: { type: "string" },
-          confidence: { type: "string" },
+          first_line: { type: "array", items: rxSchema },
+          alternative: { type: "array", items: rxSchema },
+          adjuncts: { type: "array", items: rxSchema },
+          non_drug: { type: "array", items: { type: "string" } },
+          refer_if: { type: "array", items: { type: "string" } },
+          source: { type: "string" },
         },
       },
-    },
-    tests: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["test", "reason", "priority"],
-        properties: {
-          test: { type: "string" },
-          reason: { type: "string" },
-          priority: { type: "string" },
-        },
-      },
-    },
-    plans: {
-      type: "array",
-      items: planSchema,
-    },
-    disposition: { type: "string" },
-    source_notes: {
-      type: "array",
-      items: { type: "string" },
     },
   },
 };
 
-function buildPatientText(patient: PatientInput) {
-  return [
-    `Age: ${patient.age ?? "not provided"}`,
-    `Sex: ${patient.sex ?? "not provided"}`,
-    `Weight: ${patient.weight ?? "not provided"} kg`,
-    `Pregnancy: ${patient.pregnancy ?? "not provided"}`,
-    `Allergies: ${patient.allergies ?? "not provided"}`,
-    `Temperature: ${patient.temp ?? "not provided"}`,
-    `BP: ${patient.bp ?? "not provided"}`,
-    `Pulse: ${patient.pulse ?? "not provided"}`,
-    `RR: ${patient.rr ?? "not provided"}`,
-    `SpO2: ${patient.spo2 ?? "not provided"}`,
-    `RBS: ${patient.rbs ?? "not provided"}`,
-    `Hb: ${patient.hb ?? "not provided"}`,
-    `Complaints: ${patient.complaints ?? "not provided"}`,
-    `Signs: ${patient.signs ?? "not provided"}`,
-    `Duration: ${patient.duration ?? "not provided"}`,
-    `History: ${patient.history ?? "not provided"}`,
-    `Examination: ${patient.examination ?? "not provided"}`,
-    `Extra information: ${patient.extra ?? "not provided"}`,
-    `Tests/results: ${patient.tests ?? "not provided"}`,
-  ].join("\n");
-}
+const strings = (value: unknown, limit: number): string[] =>
+  Array.isArray(value)
+    ? value
+        .map((entry) => clean(entry))
+        .filter(Boolean)
+        .slice(0, limit)
+    : [];
 
-function localConditionFallback(
-  patient: PatientInput,
-  conditions: ConditionRecord[]
-): FinalAssessment {
-  const patientText = buildPatientText(patient);
-
-  const ranked = conditions
-    .map((condition) => ({
-      condition,
-      score: scoreText(
-        patientText,
-        [
-          condition.condition,
-          condition.symptoms,
-          condition.signs,
-          condition.investigations,
-        ].join(" ")
-      ),
-    }))
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 6);
-
-  return {
-    summary:
-      "AI reasoning is temporarily unavailable. Showing relevant clinical reference matches from the STG database.",
-    urgency: "Clinician review required",
-    red_flags: [],
-    questions: [
-      "Clarify onset, duration and progression.",
-      "Ask about associated fever or chills.",
-      "Ask about urinary symptoms where relevant.",
-      "Ask about pregnancy possibility where relevant.",
-      "Ask about trauma or physical exertion.",
-      "Review allergies, previous illnesses and current medicines.",
-    ],
-    possible_diagnoses: ranked.map((item) => ({
-      condition: item.condition.condition,
-      confidence:
-        item.score >= 5
-          ? "moderate"
-          : item.score >= 2
-            ? "low"
-            : "very low",
-      why: "Relevant symptoms/signs were found in the supplied STG reference.",
-    })),
-    tests: ranked
-      .slice(0, 4)
-      .flatMap((item) => {
-        const investigation = clean(item.condition.investigations);
-
-        return investigation
-          ? [
-              {
-                test: investigation,
-                reason: "Investigation listed in the supplied STG record.",
-                priority: "Consider",
-              },
-            ]
-          : [];
-      }),
-    plans: ranked.slice(0, 4).map((item) => ({
-      condition: item.condition.condition,
-      lines: item.condition.treatment
-        ? [
-            {
-              label: "From STG record",
-              order: 1,
-              regimens: [clean(item.condition.treatment)],
-              when_to_use: "AI grounding was unavailable; this is the raw STG treatment text for clinician review.",
-            },
-          ]
-        : [],
-      regimen_variants: [],
-      alternatives: [],
-      contraindications: [],
-      cautions: [],
-      monitoring: [],
-      extended_info: [],
-    })),
-    disposition:
-      "Use the applicable current Ghana guideline and clinician assessment. AI is unavailable.",
-    source_notes: [
-      "AI unavailable.",
-      "Treatment should be verified against the current official Ghana STG/EML.",
-    ],
-  };
+async function generateWithFallback<T>(
+  ai: GoogleGenAI,
+  primary: string,
+  fallback: string,
+  schema: unknown,
+  prompt: string
+): Promise<{ data: T; model: string }> {
+  try {
+    return { data: await generateJson<T>(ai, primary, schema, prompt), model: primary };
+  } catch (error) {
+    if (isQuotaError(error)) throw error;
+    return { data: await generateJson<T>(ai, fallback, schema, prompt), model: fallback };
+  }
 }
 
 export async function POST(req: Request) {
@@ -343,7 +158,6 @@ export async function POST(req: Request) {
     }
 
     const patient = (await req.json()) as PatientInput;
-
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
@@ -351,309 +165,225 @@ export async function POST(req: Request) {
     }
 
     const { primaryModel, fallbackModel } = getModels();
-
     const ai = new GoogleGenAI({ apiKey });
-
     const patientText = buildPatientText(patient);
 
-    // ---------------------------------------------------------
-    // 1. Get the structured clinical reference data from Supabase
-    // ---------------------------------------------------------
-
-    const { data: allConditions, error: conditionError } = await supabase
-      .from("conditions")
-      .select(
-        [
-          "id",
-          "condition",
-          "chapter_number",
-          "chapter",
-          "printed_page",
-          "source_pages",
-          "symptoms",
-          "signs",
-          "investigations",
-          "treatment",
-          "referral_criteria",
-          "section_text",
-        ].join(",")
-      )
-      .limit(500);
-
-    if (conditionError) {
-      return NextResponse.json({ error: conditionError.message }, { status: 500 });
-    }
-
-    const conditions = (allConditions ?? []) as unknown as ConditionRecord[];
-
-    // ---------------------------------------------------------
-    // 2. Stage 1: AI clinical reasoning
-    // ---------------------------------------------------------
-
-    let stage1: Stage1Assessment;
+    // ---------------------------------------------------------------------
+    // Stage 1 — reasoning and search terms. No reference records yet.
+    // ---------------------------------------------------------------------
 
     const stage1Prompt = `
-You are a cautious clinical decision-support assistant for a Ghanaian health facility.
+You are a clinical decision-support assistant working alongside a clinician in a Ghanaian health facility, mid-consultation with the patient in front of them.
 
-Interpret the WHOLE encounter, not merely the chief complaint.
+Read the whole encounter, not just the chief complaint. The complaint may be vague ("waist pain").
 
-Use:
-- age
-- sex
-- pregnancy status
-- weight
-- BP
-- temperature
-- pulse
-- respiratory rate
-- SpO2
-- RBS
-- Hb
-- symptoms
-- signs
-- duration
-- history
-- examination
-- existing tests/results
+Return:
+- urgency: Routine, Urgent or Emergency.
+- red_flags: at most 4 genuinely urgent findings. Empty array when there are none — do not pad.
+- symptoms_to_treat: the symptoms that themselves need symptomatic cover, e.g. ["Fever", "Vomiting", "Severe pain"].
+- candidates: 2 to 4 plausible diagnoses, each with a ONE-sentence reason.
+- search_terms: 5 to 8 terms for searching the Ghana Standard Treatment Guidelines.
 
-The complaint may be vague, for example "waist pain".
+SEARCH TERMS MATTER MOST. The guideline is indexed by its own chapter language, not the patient's words. The patient says "waist pain"; the STG says "low back pain" or "pyelonephritis". Emit the terms a Ghanaian STG chapter heading would use, plus the candidate condition names and their common synonyms. Single clinical terms or short phrases, not sentences.
 
-Your job at this stage is ONLY clinical reasoning.
-
-Do NOT prescribe medicines.
-
-Identify:
-1. The most plausible diagnoses.
-2. Why each is being considered.
-3. Findings against each possibility.
-4. Missing information.
-5. Targeted questions that would change the differential.
-6. Useful simple tests available in the clinic.
-7. Red flags and immediate concerns.
-
-Do not claim a diagnosis is confirmed.
-
-PATIENT ENCOUNTER:
-
+PATIENT:
 ${patientText}
 `;
 
+    let stage1: Stage1;
+    let aiModelUsed = primaryModel;
+
     try {
-      stage1 = await generateJson<Stage1Assessment>(ai, primaryModel, stage1Schema, stage1Prompt);
-    } catch (primaryError) {
-      console.error("[Gemini] Stage 1 primary failed:", primaryError);
-
-      if (isQuotaError(primaryError)) {
-        stage1 = localConditionFallback(patient, conditions) as unknown as Stage1Assessment;
-      } else {
-        try {
-          stage1 = await generateJson<Stage1Assessment>(ai, fallbackModel, stage1Schema, stage1Prompt);
-        } catch (fallbackError) {
-          console.error("[Gemini] Stage 1 fallback failed:", fallbackError);
-
-          stage1 = localConditionFallback(patient, conditions) as unknown as Stage1Assessment;
-        }
-      }
+      const result = await generateWithFallback<Stage1>(
+        ai,
+        primaryModel,
+        fallbackModel,
+        stage1Schema,
+        stage1Prompt
+      );
+      stage1 = result.data;
+      aiModelUsed = result.model;
+    } catch (error) {
+      console.error("[assess] Stage 1 failed:", error);
+      return NextResponse.json(
+        {
+          error: isQuotaError(error)
+            ? "The AI service is rate limited right now. Try again shortly."
+            : "Clinical reasoning is temporarily unavailable. Try again shortly.",
+        },
+        { status: 503 }
+      );
     }
 
-    // ---------------------------------------------------------
-    // 3. Match stage-1 diagnoses against STG records
-    // ---------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Retrieval — Postgres full-text search over the whole guideline.
+    // ---------------------------------------------------------------------
 
-    const diagnosisTerms = (stage1.possible_diagnoses ?? []).flatMap((item) => [
-      item.condition,
-      ...(item.supporting_findings ?? []),
-    ]);
+    const searchTerms = strings(stage1.search_terms, 8);
+    const candidateNames = (stage1.candidates ?? []).map((item) => clean(item.condition)).filter(Boolean);
+    const symptomsToTreat = strings(stage1.symptoms_to_treat, 6);
 
-    const expandedSearchText = [patientText, ...diagnosisTerms].join(" ");
+    const conditionTerms = [...new Set([...searchTerms, ...candidateNames])].slice(0, 12);
 
-    const finalConditions = conditions
-      .map((condition) => ({
-        condition,
-        score: scoreText(
-          expandedSearchText,
-          [
-            condition.condition,
-            condition.symptoms,
-            condition.signs,
-            condition.investigations,
-            condition.treatment,
-            condition.referral_criteria,
-          ].join(" ")
-        ),
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 8)
-      .map((item) => item.condition);
+    const { data: conditionData, error: conditionError } = await supabase.rpc("search_conditions", {
+      terms: conditionTerms.length ? conditionTerms : ["general"],
+      n: 6,
+    });
 
-    // ---------------------------------------------------------
-    // 4. Get medication database and rank medicines locally
-    // ---------------------------------------------------------
+    if (conditionError) {
+      console.error("[assess] search_conditions failed:", conditionError);
+      return NextResponse.json(
+        {
+          error:
+            "Guideline search is unavailable — has supabase/004_search.sql been applied to this project?",
+        },
+        { status: 500 }
+      );
+    }
 
-    const { data: allMedications, error: medicationError } = await supabase
-      .from("medications")
-      .select(
-        [
-          "drug",
-          "formulation",
-          "strength",
-          "level_of_care",
-          "contraindications",
-          "cautions",
-          "eml_page",
-          "category",
-        ].join(",")
-      )
-      .in("level_of_care", ["B2", "C"])
-      .limit(1000);
+    const conditions = asConditionHits(conditionData);
+
+    const medicationTerms = [
+      ...new Set([
+        ...candidateNames,
+        ...symptomsToTreat,
+        ...conditions.flatMap((hit) => termsFromText(hit.treatment, 8)),
+      ]),
+    ].slice(0, 24);
+
+    const { data: medicationData, error: medicationError } = await supabase.rpc("search_medications", {
+      terms: medicationTerms.length ? medicationTerms : ["analgesic"],
+      n: 30,
+    });
 
     if (medicationError) {
-      return NextResponse.json({ error: medicationError.message }, { status: 500 });
+      console.error("[assess] search_medications failed:", medicationError);
+      return NextResponse.json(
+        {
+          error:
+            "Medicine search is unavailable — has supabase/004_search.sql been applied to this project?",
+        },
+        { status: 500 }
+      );
     }
 
-    const medications = (allMedications ?? []) as unknown as MedicationRecord[];
+    const medications = asMedicationHits(medicationData);
 
-    const medicationSearchText = [
-      ...(stage1.possible_diagnoses ?? []).map((x) => x.condition),
-      ...finalConditions.map((x) => x.condition),
-      ...finalConditions.map((x) => x.treatment),
-    ].join(" ");
-
-    const relevantMedications = medications
-      .map((medication) => ({
-        medication,
-        score: scoreText(
-          medicationSearchText,
-          [medication.drug, medication.formulation, medication.strength, medication.category].join(" ")
-        ),
-      }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 60)
-      .map((x) => x.medication);
-
-    // ---------------------------------------------------------
-    // 5. Evidence text kept deliberately small
-    // ---------------------------------------------------------
-
-    const conditionEvidence = finalConditions.map((c) => ({
-      id: c.id,
-      condition: c.condition,
-      symptoms: c.symptoms,
-      signs: c.signs,
-      investigations: c.investigations,
-      treatment: c.treatment,
-      referral_criteria: c.referral_criteria,
-      source_pages: c.source_pages,
+    const conditionEvidence = conditions.map((hit) => ({
+      condition: hit.condition,
+      printed_page: hit.printed_page,
+      symptoms: hit.symptoms,
+      signs: hit.signs,
+      investigations: hit.investigations,
+      treatment: hit.treatment,
+      referral_criteria: hit.referral_criteria,
     }));
 
-    // ---------------------------------------------------------
-    // 6. Stage 2: evidence-grounded treatment reasoning
-    // ---------------------------------------------------------
+    const medicationEvidence = medications.map((hit) => ({
+      drug: hit.drug,
+      formulation: hit.formulation,
+      strength: hit.strength,
+      category: hit.category,
+    }));
+
+    // ---------------------------------------------------------------------
+    // Stage 2 — grounded prescription.
+    // ---------------------------------------------------------------------
 
     const stage2Prompt = `
-You are the evidence-grounding stage of a clinical decision-support application for a Ghanaian health facility.
+You are prescribing alongside a clinician mid-consultation. Be brief and directly usable — this is not a reference article.
 
-FACILITY CONTEXT:
-- Facility level: C (a facility that prefers B2-level options when they are adequate).
-- Facility observation is normally up to 24 hours; this is an operational constraint and NOT a clinical treatment rule.
-${TREATMENT_STRUCTURE_RULES}
-${REGIMEN_VARIANT_RULES}
+Return 2 or 3 diagnoses. Never 1, never more than 3. When the picture is clear, the second and third are the differentials genuinely worth excluding — say so in "why" rather than padding.
+
+For each diagnosis:
+- "why": ONE sentence, 25 words maximum.
+- "first_line": 1 to 3 medicines that actually treat the condition.
+- "alternative": usually empty. Populate only when an allergy or a contraindication makes the first line unsuitable.
+- "adjuncts": symptomatic cover. MANDATORY where symptoms warrant it — for every symptom listed in SYMPTOMS TO TREAT below, include a matching medicine with "purpose" set: antipyretic for fever, analgesic for pain, antiemetic for vomiting, ORS and zinc for diarrhoea in children, antihistamine for itch, antispasmodic for colic. A prescription without them is incomplete. Never repeat a drug that already appears in first_line.
+- "non_drug": at most 3 short phrases.
+- "refer_if": at most 3 short phrases.
+- "source": when one of the STG records below covers this condition, use "Ghana STG p.<printed_page>" with that record's printed_page and prefer its regimen. When the STG is silent, answer fully from WHO, CDC/IDSA, NICE or standard practice and name which.
+${DOSE_RULE_PROMPT}
 ${CLINICAL_GROUNDING_RULES}
-- Do not automatically turn a negative test into a diagnosis.
-- Ask only useful questions that can change the assessment.
-- Recommend only useful/simple tests relevant to the differential.
-${EXTENDED_INFO_RULES}
-
-LINKING RULE (do not skip — the UI matches plans to diagnoses by this text):
-- Every entry in "possible_diagnoses" that has a treatment plan MUST have a "plans" entry whose "condition" field is copied character-for-character identical to that diagnosis's "condition" field. Do not paraphrase, reorder words, add/remove qualifiers like "suspected" or "uncomplicated", or otherwise vary the wording between the two.
 
 PATIENT:
 ${patientText}
 
-STAGE 1 CLINICAL REASONING:
-${JSON.stringify(stage1)}
+CLINICAL REASONING SO FAR:
+${JSON.stringify({
+  urgency: stage1.urgency,
+  red_flags: stage1.red_flags,
+  candidates: stage1.candidates,
+})}
 
-RELEVANT STG RECORDS:
+SYMPTOMS TO TREAT (each needs an adjunct):
+${JSON.stringify(symptomsToTreat)}
+
+GHANA STG RECORDS RETRIEVED:
 ${JSON.stringify(conditionEvidence)}
 
-RELEVANT MEDICATION RECORDS (with level_of_care available only as background context):
-${JSON.stringify(relevantMedications)}
-
-Return the structured result.
+MEDICINES AVAILABLE IN THE ESSENTIAL MEDICINES LIST:
+${JSON.stringify(medicationEvidence)}
 `;
 
-    let finalAssessment: FinalAssessment;
-    let aiModelUsed = primaryModel;
+    let stage2: Stage2;
 
     try {
-      finalAssessment = await generateJson<FinalAssessment>(ai, primaryModel, finalSchema, stage2Prompt);
-    } catch (primaryError) {
-      console.error("[Gemini] Stage 2 primary failed:", primaryError);
-
-      try {
-        finalAssessment = await generateJson<FinalAssessment>(ai, fallbackModel, finalSchema, stage2Prompt);
-
-        aiModelUsed = fallbackModel;
-      } catch (fallbackError) {
-        console.error("[Gemini] Stage 2 fallback failed:", fallbackError);
-
-        // Safe reference-only fallback.
-        finalAssessment = {
-          summary:
-            "AI treatment reasoning is temporarily unavailable. Relevant STG/EML reference records are shown for clinician review.",
-          urgency: stage1.urgency || "Clinician review required",
-          red_flags: stage1.red_flags || [],
-          questions: stage1.questions || [],
-          possible_diagnoses: (stage1.possible_diagnoses || []).map((item) => ({
-            condition: item.condition,
-            confidence: item.likelihood,
-            why: item.supporting_findings.join("; "),
-          })),
-          tests: stage1.tests || [],
-          plans: conditionEvidence.slice(0, 4).map((c) => ({
-            condition: c.condition,
-            lines: c.treatment
-              ? [
-                  {
-                    label: "From STG record",
-                    order: 1,
-                    regimens: [clean(c.treatment)],
-                    when_to_use: "AI grounding was unavailable; this is the raw STG treatment text for clinician review.",
-                  },
-                ]
-              : [],
-            regimen_variants: [],
-            alternatives: [],
-            contraindications: [],
-            cautions: [],
-            monitoring: [],
-            extended_info: [],
-          })),
-          disposition: "Use the applicable current official Ghana guideline and clinician assessment.",
-          source_notes: [
-            "AI treatment reasoning was unavailable.",
-            "Review the retrieved STG/EML evidence before prescribing.",
-          ],
-        };
-
-        aiModelUsed = "reference-only";
-      }
+      const result = await generateWithFallback<Stage2>(
+        ai,
+        primaryModel,
+        fallbackModel,
+        stage2Schema,
+        stage2Prompt
+      );
+      stage2 = result.data;
+      aiModelUsed = result.model;
+    } catch (error) {
+      console.error("[assess] Stage 2 failed:", error);
+      return NextResponse.json(
+        {
+          error: isQuotaError(error)
+            ? "The AI service is rate limited right now. Try again shortly."
+            : "Treatment reasoning is temporarily unavailable. Try again shortly.",
+        },
+        { status: 503 }
+      );
     }
 
-    // ---------------------------------------------------------
-    // 7. Save consultation using your ACTUAL schema
-    // ---------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Post-processing: safety rules and dose arithmetic, both in code.
+    // ---------------------------------------------------------------------
 
-    const sourceConditionIds = finalConditions
-      .map((c) => c.id)
-      .filter((id: unknown) => id !== null && id !== undefined);
+    const withDoses = (list: Rx[]): ClientRx[] =>
+      list.map((rx) => ({ ...rx, computed: computeDose(rx, patient) }));
 
-    const assessmentToSave = {
-      ...finalAssessment,
-      stage1_reasoning: stage1,
-      reference_conditions: conditionEvidence,
-      reference_medications: relevantMedications,
+    const noStgMatch = conditions.length === 0;
+
+    const diagnoses: DiagnosisCard[] = (stage2.diagnoses ?? []).slice(0, 3).map((card) => {
+      const firstLine = normalizeRxList(card.first_line).slice(0, 3);
+      const alternative = normalizeRxList(card.alternative);
+      const adjuncts = normalizeRxList(card.adjuncts);
+
+      return {
+        condition: clean(card.condition),
+        likelihood: card.likelihood === "High" || card.likelihood === "Low" ? card.likelihood : "Moderate",
+        why: clean(card.why),
+        first_line: withDoses(firstLine),
+        alternative: withDoses(alternative),
+        adjuncts: withDoses(adjuncts),
+        non_drug: strings(card.non_drug, 3),
+        refer_if: strings(card.refer_if, 3),
+        source: noStgMatch ? "Standard practice" : clean(card.source) || "Standard practice",
+        safety_flags: checkSafety([...firstLine, ...alternative, ...adjuncts], patient),
+      };
+    });
+
+    const result = {
+      urgency: stage1.urgency,
+      red_flags: strings(stage2.red_flags, 4).length
+        ? strings(stage2.red_flags, 4)
+        : strings(stage1.red_flags, 4),
+      diagnoses,
     };
 
     const { data: consultation, error: saveError } = await supabase
@@ -662,26 +392,19 @@ Return the structured result.
         clinician_id: user.id,
         patient_input: patient,
         patient_data: patient,
-        assessment: assessmentToSave,
-        source_condition_ids: sourceConditionIds,
+        assessment: { ...result, stage1_reasoning: stage1 },
+        source_condition_ids: conditions.map((hit) => hit.id),
         ai_model: aiModelUsed,
       })
       .select("id")
       .single();
 
     if (saveError) {
-      console.error("Consultation save error:", saveError);
+      console.error("[assess] Consultation save error:", saveError);
     }
 
     return NextResponse.json({
-      result: finalAssessment,
-      reasoning: stage1,
-      source_conditions: conditionEvidence,
-      source_medications: relevantMedications,
-      evidence: {
-        conditions: conditionEvidence,
-        medications: relevantMedications,
-      },
+      result,
       consultationId: consultation?.id ?? null,
       aiModel: aiModelUsed,
     });
@@ -689,9 +412,7 @@ Return the structured result.
     console.error("Assessment error:", error);
 
     return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Assessment failed",
-      },
+      { error: error instanceof Error ? error.message : "Assessment failed" },
       { status: 500 }
     );
   }

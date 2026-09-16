@@ -1,227 +1,95 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
-import { TreatmentPlan, Plan, slugify } from "@/components/TreatmentPlan";
+import { useState } from "react";
+import DiagnosisCard from "@/components/DiagnosisCard";
+import type { DiagnosisCardData } from "@/components/DiagnosisCard";
+import { EMPTY_PATIENT } from "@/lib/types";
+import type { PatientInput } from "@/lib/types";
 
-type Diagnosis = {
-  condition: string;
-  confidence: string;
-  why: string;
-};
-
-type TestRecommendation = {
-  test: string;
-  reason: string;
-  priority: string;
-};
-
-type Result = {
-  summary: string;
-  urgency: string;
+type AssessResult = {
+  urgency: "Routine" | "Urgent" | "Emergency";
   red_flags: string[];
-  questions: string[];
-  possible_diagnoses: Diagnosis[];
-  tests: TestRecommendation[];
-  plans: Plan[];
-  immediate_actions: string[];
-  disposition: string;
-  source_notes: string[];
+  diagnoses: DiagnosisCardData[];
 };
 
-type Evidence = {
-  conditions: Array<{
-    id: number;
-    condition: string;
-    source_pages?: string | null;
-  }>;
-  medications: Array<{
-    id: number;
-    drug: string;
-    formulation?: string | null;
-    strength?: string | null;
-    level_of_care?: string | null;
-    eml_page?: string | null;
-    contraindications?: string | null;
-    cautions?: string | null;
-  }>;
+const ALLERGY_CHIPS = ["No known allergy", "Penicillin", "Sulfa", "NSAIDs", "Other"];
+const NO_KNOWN = "No known allergy";
+
+const numberOrNull = (value: string): number | null => {
+  if (!value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 };
-
-const initialForm = {
-  facilityLevel: "C",
-  preferredLevel: "B2",
-  pregnancy: "Unknown",
-  age: "",
-  sex: "",
-  weight: "",
-  temp: "",
-  bp: "",
-  pulse: "",
-  rr: "",
-  spo2: "",
-  rbs: "",
-  hb: "",
-  allergies: "",
-  complaints: "",
-  extra: "",
-  tests: "",
-};
-
-function Field({ label, name, form, set, wide = false, type = "text" }: any) {
-  return (
-    <label className={`field ${wide ? "wide" : ""}`}>
-      <span>{label}</span>
-      <input
-        type={type}
-        value={form[name] ?? ""}
-        onChange={(e) => set(name, e.target.value)}
-      />
-    </label>
-  );
-}
-
-function Section({ title, description, children, tone = "default" }: any) {
-  return (
-    <section className={`resultSection ${tone}`}>
-      <div className="sectionHeading">
-        <div>
-          <h3>{title}</h3>
-          {description && <p className="muted">{description}</p>}
-        </div>
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function Tag({ children, kind = "neutral" }: any) {
-  return <span className={`tag ${kind}`}>{children}</span>;
-}
-
-const CONDITION_STOPWORDS = new Set([
-  "suspected",
-  "possible",
-  "probable",
-  "confirmed",
-  "likely",
-  "acute",
-  "chronic",
-  "mild",
-  "moderate",
-  "severe",
-  "uncomplicated",
-  "complicated",
-  "early",
-  "late",
-  "recurrent",
-  "the",
-  "and",
-  "with",
-]);
-
-function coreTokens(value: string): Set<string> {
-  return new Set(
-    value
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((word) => word.length > 2 && !CONDITION_STOPWORDS.has(word))
-  );
-}
-
-function findPlanForCondition(conditionName: string, plans: Plan[]): Plan | null {
-  if (!plans?.length) return null;
-  const targetSlug = slugify(conditionName);
-  const exact = plans.find((plan) => slugify(plan.condition) === targetSlug);
-  if (exact) return exact;
-
-  const lowerTarget = conditionName.toLowerCase();
-  const substring = plans.find(
-    (plan) =>
-      plan.condition.toLowerCase().includes(lowerTarget) ||
-      lowerTarget.includes(plan.condition.toLowerCase())
-  );
-  if (substring) return substring;
-
-  // Wording between the diagnosis list and the plan list can drift
-  // slightly (different qualifiers, word order). Fall back to core-word
-  // overlap so a plan still gets found and linked.
-  const targetTokens = coreTokens(conditionName);
-  if (!targetTokens.size) return null;
-
-  let best: { plan: Plan; score: number } | null = null;
-  for (const plan of plans) {
-    const planTokens = coreTokens(plan.condition);
-    if (!planTokens.size) continue;
-
-    let shared = 0;
-    for (const token of targetTokens) {
-      if (planTokens.has(token)) shared++;
-    }
-
-    const score = shared / Math.min(targetTokens.size, planTokens.size);
-    if (score > 0 && (!best || score > best.score)) {
-      best = { plan, score };
-    }
-  }
-
-  return best && best.score >= 0.5 ? best.plan : null;
-}
 
 export default function AssessmentForm() {
-  const [form, setForm] = useState<any>(initialForm);
-  const [result, setResult] = useState<Result | null>(null);
-  const [evidence, setEvidence] = useState<Evidence | null>(null);
+  const [form, setForm] = useState<PatientInput>(EMPTY_PATIENT);
+  const [chips, setChips] = useState<string[]>([]);
+  const [otherAllergy, setOtherAllergy] = useState("");
+  const [showExtraMeasurements, setShowExtraMeasurements] = useState(false);
+
+  const [result, setResult] = useState<AssessResult | null>(null);
+  const [openCard, setOpenCard] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [questionAnswers, setQuestionAnswers] = useState<Record<number, string>>({});
-  const [showEvidence, setShowEvidence] = useState(false);
-  const [openPlans, setOpenPlans] = useState<Set<string>>(new Set());
-  const [highlightedPlan, setHighlightedPlan] = useState<string | null>(null);
-  const planRefs = useRef<Record<string, HTMLElement | null>>({});
 
-  const set = (key: string, value: string) => setForm((current: any) => ({ ...current, [key]: value }));
+  const set = <K extends keyof PatientInput>(key: K, value: PatientInput[K]) =>
+    setForm((current) => ({ ...current, [key]: value }));
 
-  function togglePlan(key: string) {
-    setOpenPlans((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
+  // Weight is only asked for when it changes the dose — children.
+  const showWeight = form.age === null || form.age < 12;
+  const showMonths = form.age === null || form.age < 2;
+  const showPregnancy =
+    form.sex === "Female" && (form.age === null || (form.age >= 10 && form.age <= 55));
+
+  function setAge(value: string) {
+    const age = numberOrNull(value);
+    setForm((current) => ({
+      ...current,
+      age,
+      // Clear values that are no longer being collected.
+      weight: age !== null && age >= 12 ? null : current.weight,
+      age_months: age !== null && age >= 2 ? null : current.age_months,
+    }));
+  }
+
+  function setSex(value: string) {
+    const sex = value as PatientInput["sex"];
+    setForm((current) => ({
+      ...current,
+      sex,
+      pregnancy: sex === "Female" ? current.pregnancy : "Unknown",
+      trimester: sex === "Female" ? current.trimester : null,
+    }));
+  }
+
+  function toggleChip(chip: string) {
+    setChips((current) => {
+      if (chip === NO_KNOWN) return current.includes(NO_KNOWN) ? [] : [NO_KNOWN];
+      const without = current.filter((entry) => entry !== NO_KNOWN);
+      return without.includes(chip)
+        ? without.filter((entry) => entry !== chip)
+        : [...without, chip];
     });
   }
 
-  function jumpToTreatment(conditionName: string) {
-    const plan = findPlanForCondition(conditionName, result?.plans ?? []);
-    if (!plan) return;
-
-    const key = slugify(plan.condition);
-    setOpenPlans((current) => new Set(current).add(key));
-    setHighlightedPlan(key);
-
-    window.setTimeout(() => {
-      planRefs.current[key]?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 60);
-
-    window.setTimeout(() => setHighlightedPlan((current) => (current === key ? null : current)), 2200);
+  function allergyList(): string[] {
+    if (chips.includes(NO_KNOWN)) return [NO_KNOWN];
+    const named = chips.filter((chip) => chip !== "Other");
+    const other = otherAllergy.trim();
+    return other ? [...named, other] : named;
   }
-
-  const filledQuestionCount = useMemo(
-    () => Object.values(questionAnswers).filter((value) => value.trim()).length,
-    [questionAnswers]
-  );
 
   async function assess() {
     setLoading(true);
     setError("");
-    try {
-      const answeredQuestions = Object.entries(questionAnswers)
-        .filter(([, answer]) => answer.trim())
-        .map(([index, answer]) => `Question ${Number(index) + 1}: ${answer.trim()}`)
-        .join("\n");
 
-      const payload = {
+    try {
+      const payload: PatientInput = {
         ...form,
-        extra: [form.extra, answeredQuestions].filter(Boolean).join("\n\n"),
+        weight: showWeight ? form.weight : null,
+        pregnancy: showPregnancy ? form.pregnancy : "Unknown",
+        trimester: showPregnancy && form.pregnancy === "Yes" ? form.trimester : null,
+        allergies: allergyList(),
       };
 
       const response = await fetch("/api/assess", {
@@ -234,9 +102,12 @@ export default function AssessmentForm() {
       if (!response.ok) throw new Error(data.error || "Assessment failed.");
 
       setResult(data.result);
-      setEvidence(data.evidence ?? null);
+      setOpenCard(data.result?.diagnoses?.length ? 0 : null);
+
       window.setTimeout(() => {
-        document.getElementById("assessment-results")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        document
+          .getElementById("assessment-results")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 50);
     } catch (err: any) {
       setError(err.message || "Assessment failed.");
@@ -246,13 +117,12 @@ export default function AssessmentForm() {
   }
 
   function reset() {
-    setForm(initialForm);
+    setForm(EMPTY_PATIENT);
+    setChips([]);
+    setOtherAllergy("");
     setResult(null);
-    setEvidence(null);
+    setOpenCard(null);
     setError("");
-    setQuestionAnswers({});
-    setOpenPlans(new Set());
-    setHighlightedPlan(null);
   }
 
   return (
@@ -263,63 +133,194 @@ export default function AssessmentForm() {
             <span className="eyebrow">NEW CONSULTATION</span>
             <h2>Patient assessment</h2>
             <p className="muted">
-              Enter what you know. The assistant uses the whole encounter, then checks the STG/EML database before presenting treatment.
+              Enter what you know. The assistant searches the Ghana STG, then gives you two or three
+              diagnoses with what to prescribe.
             </p>
-          </div>
-          <div className="settingPills">
-            <Tag kind="facility">Facility C</Tag>
-            <Tag kind="b2">Treatment shown by line: 1st, 2nd, 3rd...</Tag>
           </div>
         </div>
 
         <div className="subheading">Patient</div>
         <div className="formGrid">
-          <Field label="Age (years)" name="age" form={form} set={set} type="number" />
+          <label className="field">
+            <span>Age (years)</span>
+            <input
+              type="number"
+              value={form.age ?? ""}
+              onChange={(e) => setAge(e.target.value)}
+            />
+          </label>
+
+          {showMonths && (
+            <label className="field">
+              <span>Age (months) — under 2s</span>
+              <input
+                type="number"
+                value={form.age_months ?? ""}
+                onChange={(e) => set("age_months", numberOrNull(e.target.value))}
+              />
+            </label>
+          )}
+
           <label className="field">
             <span>Sex</span>
-            <select value={form.sex} onChange={(e) => set("sex", e.target.value)}>
+            <select value={form.sex} onChange={(e) => setSex(e.target.value)}>
               <option value="">Select</option>
               <option value="Female">Female</option>
               <option value="Male">Male</option>
-              <option value="Other">Other</option>
             </select>
           </label>
-          <Field label="Weight (kg)" name="weight" form={form} set={set} type="number" />
-          <label className="field">
-            <span>Pregnancy</span>
-            <select value={form.pregnancy} onChange={(e) => set("pregnancy", e.target.value)}>
-              <option>Unknown</option>
-              <option>Yes</option>
-              <option>No</option>
-            </select>
-          </label>
-          <Field label="Allergies" name="allergies" form={form} set={set} wide />
+
+          {showWeight && (
+            <label className="field">
+              <span>Weight (kg) — needed for child dosing</span>
+              <input
+                type="number"
+                value={form.weight ?? ""}
+                onChange={(e) => set("weight", numberOrNull(e.target.value))}
+              />
+            </label>
+          )}
+
+          {showPregnancy && (
+            <label className="field">
+              <span>Pregnancy</span>
+              <select
+                value={form.pregnancy}
+                onChange={(e) => set("pregnancy", e.target.value as PatientInput["pregnancy"])}
+              >
+                <option>Unknown</option>
+                <option>Yes</option>
+                <option>No</option>
+              </select>
+            </label>
+          )}
+
+          {showPregnancy && form.pregnancy === "Yes" && (
+            <label className="field">
+              <span>Trimester</span>
+              <select
+                value={form.trimester ?? ""}
+                onChange={(e) =>
+                  set(
+                    "trimester",
+                    e.target.value ? (Number(e.target.value) as 1 | 2 | 3) : null
+                  )
+                }
+              >
+                <option value="">Unsure</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+              </select>
+            </label>
+          )}
         </div>
 
-        <div className="subheading">Vitals & bedside measurements</div>
-        <div className="formGrid">
-          <Field label="Temperature °C" name="temp" form={form} set={set} type="number" />
-          <Field label="BP" name="bp" form={form} set={set} />
-          <Field label="Pulse /min" name="pulse" form={form} set={set} type="number" />
-          <Field label="RR /min" name="rr" form={form} set={set} type="number" />
-          <Field label="SpO₂ %" name="spo2" form={form} set={set} type="number" />
-          <Field label="RBS" name="rbs" form={form} set={set} />
-          <Field label="Hb" name="hb" form={form} set={set} />
+        <div className="subheading">Allergies</div>
+        <div className="chipRow">
+          {ALLERGY_CHIPS.map((chip) => {
+            const active = chips.includes(chip);
+            const disabled = chips.includes(NO_KNOWN) && chip !== NO_KNOWN;
+
+            return (
+              <button
+                type="button"
+                key={chip}
+                className={`chip ${active ? "active" : ""}`}
+                onClick={() => toggleChip(chip)}
+                disabled={disabled}
+                aria-pressed={active}
+              >
+                {chip}
+              </button>
+            );
+          })}
         </div>
+
+        {chips.includes("Other") && (
+          <div className="formGrid">
+            <label className="field wide">
+              <span>Which allergy?</span>
+              <input
+                type="text"
+                value={otherAllergy}
+                onChange={(e) => setOtherAllergy(e.target.value)}
+                placeholder="e.g. Chloroquine"
+              />
+            </label>
+          </div>
+        )}
+
+        <div className="subheading">Vitals</div>
+        <div className="formGrid">
+          <label className="field">
+            <span>Temperature °C</span>
+            <input
+              type="number"
+              value={form.temp ?? ""}
+              onChange={(e) => set("temp", numberOrNull(e.target.value))}
+            />
+          </label>
+          <label className="field">
+            <span>BP</span>
+            <input type="text" value={form.bp ?? ""} onChange={(e) => set("bp", e.target.value)} />
+          </label>
+          <label className="field">
+            <span>Pulse /min</span>
+            <input
+              type="number"
+              value={form.pulse ?? ""}
+              onChange={(e) => set("pulse", numberOrNull(e.target.value))}
+            />
+          </label>
+        </div>
+
+        <button
+          type="button"
+          className="textButton toggleRow"
+          onClick={() => setShowExtraMeasurements((value) => !value)}
+        >
+          {showExtraMeasurements ? "Hide extra measurements" : "Add extra measurements"}
+        </button>
+
+        {showExtraMeasurements && (
+          <div className="formGrid">
+            <label className="field">
+              <span>RBS</span>
+              <input type="text" value={form.rbs ?? ""} onChange={(e) => set("rbs", e.target.value)} />
+            </label>
+            <label className="field">
+              <span>Hb</span>
+              <input type="text" value={form.hb ?? ""} onChange={(e) => set("hb", e.target.value)} />
+            </label>
+          </div>
+        )}
 
         <div className="subheading">Clinical story</div>
         <div className="formGrid">
           <label className="field wide">
-            <span>Main complaint, symptoms, signs & duration</span>
-            <textarea value={form.complaints} onChange={(e) => set("complaints", e.target.value)} placeholder="e.g. waist pain for 3 days, fever since yesterday..." />
+            <span>Main complaint, symptoms, signs &amp; duration</span>
+            <textarea
+              value={form.complaints}
+              onChange={(e) => set("complaints", e.target.value)}
+              placeholder="e.g. waist pain for 3 days, fever since yesterday..."
+            />
           </label>
           <label className="field wide">
             <span>Extra history / examination findings</span>
-            <textarea value={form.extra} onChange={(e) => set("extra", e.target.value)} placeholder="Trauma, urinary symptoms, discharge, menstrual history, medications, past history, neurological findings, etc." />
+            <textarea
+              value={form.extra ?? ""}
+              onChange={(e) => set("extra", e.target.value)}
+              placeholder="Trauma, urinary symptoms, discharge, menstrual history, medications, past history..."
+            />
           </label>
           <label className="field wide">
             <span>Tests already done + results</span>
-            <textarea value={form.tests} onChange={(e) => set("tests", e.target.value)} placeholder="RDT negative; pregnancy negative; Hb 10.2 g/dL; etc." />
+            <textarea
+              value={form.tests ?? ""}
+              onChange={(e) => set("tests", e.target.value)}
+              placeholder="RDT negative; pregnancy negative; Hb 10.2 g/dL; etc."
+            />
           </label>
         </div>
 
@@ -329,165 +330,46 @@ export default function AssessmentForm() {
           <button className="primaryButton" onClick={assess} disabled={loading}>
             {loading ? "Assessing..." : result ? "Reassess patient" : "Assess patient"}
           </button>
-          <button className="secondaryButton" onClick={reset} disabled={loading}>Clear</button>
+          <button className="secondaryButton" onClick={reset} disabled={loading}>
+            Clear
+          </button>
         </div>
       </section>
 
       {result && (
         <section id="assessment-results" className="resultsCard card">
-          <div className="resultHero">
-            <div>
-              <span className="eyebrow">DECISION SUPPORT</span>
-              <h2>Clinical assessment</h2>
-              <p>{result.summary}</p>
-            </div>
-            <div className="urgencyPanel">
-              <span className="muted">Urgency</span>
-              <strong>{result.urgency}</strong>
-            </div>
-          </div>
-
           {result.red_flags?.length > 0 && (
-            <Section title="Red flags / urgent issues" tone="danger">
-              <ul className="cleanList">{result.red_flags.map((item, i) => <li key={i}>{item}</li>)}</ul>
-            </Section>
-          )}
-
-          <Section title="Possible diagnoses" description="Ranked possibilities, not confirmed diagnoses. Click one to jump to its treatment.">
-            <div className="diagnosisList">
-              {result.possible_diagnoses?.map((item, i) => {
-                const hasPlan = !!findPlanForCondition(item.condition, result.plans ?? []);
-                return (
-                  <button
-                    type="button"
-                    className={`diagnosisCard ${hasPlan ? "clickable" : ""}`}
-                    key={`${item.condition}-${i}`}
-                    onClick={() => hasPlan && jumpToTreatment(item.condition)}
-                    disabled={!hasPlan}
-                  >
-                    <div className="diagnosisTop">
-                      <div className="diagnosisIndex">{i + 1}</div>
-                      <div>
-                        <h4>{item.condition}</h4>
-                        <Tag kind={item.confidence?.toLowerCase() === "high" ? "high" : item.confidence?.toLowerCase() === "moderate" ? "moderate" : "low"}>{item.confidence}</Tag>
-                      </div>
-                    </div>
-                    <p>{item.why}</p>
-                    {hasPlan && <span className="diagnosisLink">View treatment ↓</span>}
-                  </button>
-                );
-              })}
-            </div>
-          </Section>
-
-          {result.questions?.length > 0 && (
-            <Section
-              title="Questions to ask next"
-              description="Answer these and click Reassess. Answers are added to the next clinical assessment."
-            >
-              <div className="questionList">
-                {result.questions.map((question, i) => (
-                  <div className="questionRow" key={i}>
-                    <div className="questionNumber">{i + 1}</div>
-                    <div className="questionBody">
-                      <strong>{question}</strong>
-                      <textarea
-                        value={questionAnswers[i] ?? ""}
-                        onChange={(e) => setQuestionAnswers((current) => ({ ...current, [i]: e.target.value }))}
-                        placeholder="Enter the patient's answer / your finding"
-                      />
-                    </div>
-                  </div>
+            <div className="redFlagBar">
+              <strong>Red flags</strong>
+              <ul className="cleanList">
+                {result.red_flags.map((flag, i) => (
+                  <li key={i}>{flag}</li>
                 ))}
-              </div>
-              <div className="questionFooter">
-                <span className="muted">{filledQuestionCount} answer(s) entered</span>
-                <button className="primaryButton smallButton" onClick={assess} disabled={loading}>
-                  {loading ? "Reassessing..." : "Reassess with answers"}
-                </button>
-              </div>
-            </Section>
-          )}
-
-          {result.tests?.length > 0 && (
-            <Section title="Targeted tests" description="Tests selected to help distinguish the leading possibilities.">
-              <div className="testGrid">
-                {result.tests.map((test, i) => (
-                  <article className="testCard" key={i}>
-                    <div className="cardInlineHeader">
-                      <h4>{test.test}</h4>
-                      <Tag kind={test.priority?.toLowerCase() === "urgent" ? "danger" : "neutral"}>{test.priority}</Tag>
-                    </div>
-                    <p>{test.reason}</p>
-                  </article>
-                ))}
-              </div>
-            </Section>
-          )}
-
-          {result.immediate_actions?.length > 0 && (
-            <Section title="Immediate management" tone="action">
-              <ul className="cleanList">{result.immediate_actions.map((item, i) => <li key={i}>{item}</li>)}</ul>
-            </Section>
-          )}
-
-          <Section title="Treatment plan" description="Organized by treatment line (1st, 2nd, 3rd...), not facility level. Click a condition to expand or collapse its treatment.">
-            <div className="treatmentList">
-              {result.plans?.map((plan, i) => {
-                const key = slugify(plan.condition);
-                return (
-                  <TreatmentPlan
-                    key={`${plan.condition}-${i}`}
-                    plan={plan}
-                    open={openPlans.has(key)}
-                    onToggle={() => togglePlan(key)}
-                    highlighted={highlightedPlan === key}
-                    ref={(el) => {
-                      planRefs.current[key] = el;
-                    }}
-                  />
-                );
-              })}
-              {!result.plans?.length && (
-                <p className="muted">No treatment plan was returned for this assessment.</p>
-              )}
+              </ul>
             </div>
-          </Section>
-
-          <Section title="24-hour management & disposition">
-            <div className="dispositionBox">{result.disposition}</div>
-          </Section>
-
-          {result.source_notes?.length > 0 && (
-            <Section title="Source notes">
-              <ul className="cleanList">{result.source_notes.map((item, i) => <li key={i}>{item}</li>)}</ul>
-            </Section>
           )}
 
-          <div className="evidenceBar">
-            <div>
-              <strong>Evidence used:</strong> {evidence?.conditions.length ?? 0} STG record(s), {evidence?.medications.length ?? 0} B2/C EML medicine record(s).
-            </div>
-            <button className="textButton" onClick={() => setShowEvidence((value) => !value)}>
-              {showEvidence ? "Hide evidence" : "Show evidence"}
-            </button>
+          <div className="urgencyRow">
+            <span className={`urgencyChip ${result.urgency?.toLowerCase()}`}>{result.urgency}</span>
           </div>
 
-          {showEvidence && evidence && (
-            <div className="evidencePanel">
-              <div>
-                <h4>STG records retrieved</h4>
-                <ul className="cleanList">{evidence.conditions.map((item) => <li key={item.id}><strong>{item.condition}</strong>{item.source_pages ? ` — ${item.source_pages}` : ""}</li>)}</ul>
-              </div>
-              <div>
-                <h4>EML medicine records retrieved</h4>
-                <ul className="cleanList">{evidence.medications.map((item) => <li key={item.id}><strong>{item.drug}</strong> — {item.formulation ?? ""} {item.strength ?? ""} <Tag kind={item.level_of_care === "B2" ? "b2" : "c"}>{item.level_of_care ?? ""}</Tag>{item.eml_page ? ` · p.${item.eml_page}` : ""}</li>)}</ul>
-              </div>
-            </div>
-          )}
+          <div className="dxList">
+            {result.diagnoses?.map((card, index) => (
+              <DiagnosisCard
+                key={`${card.condition}-${index}`}
+                card={card}
+                open={openCard === index}
+                onToggle={() => setOpenCard((current) => (current === index ? null : index))}
+              />
+            ))}
+            {!result.diagnoses?.length && (
+              <p className="muted">No diagnoses were returned for this encounter.</p>
+            )}
+          </div>
 
           <div className="safetyNotice">
-            <strong>Clinical safety:</strong> This is decision support, not an autonomous diagnosis or prescribing system. Verify treatment, dose, route, contraindications and current Ghana guidance before prescribing. The supplied source material includes older guidance and may require confirmation against current official updates.
+            <strong>Clinical safety:</strong> This is decision support, not an autonomous diagnosis or
+            prescribing system. Check every dose and contraindication before prescribing.
           </div>
         </section>
       )}

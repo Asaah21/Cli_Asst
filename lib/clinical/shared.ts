@@ -1,50 +1,9 @@
 import { GoogleGenAI } from "@google/genai";
 
-// ---------------------------------------------------------------------------
-// Text ranking helpers (shared by the full assessment flow and the
-// standalone condition lookup flow).
-// ---------------------------------------------------------------------------
-
 export const clean = (value: unknown) =>
   String(value ?? "")
     .replace(/\s+/g, " ")
     .trim();
-
-export const tokens = (value: unknown): string[] =>
-  [
-    ...new Set(
-      clean(value)
-        .toLowerCase()
-        .replace(/[^a-z0-9\s-]/g, " ")
-        .split(/\s+/)
-        .filter((x) => x.length >= 4)
-    ),
-  ].slice(0, 80);
-
-export const scoreText = (query: string, text: string) => {
-  const queryTerms = new Set(tokens(query));
-  const textTerms = new Set(tokens(text));
-
-  let score = 0;
-
-  for (const term of queryTerms) {
-    if (textTerms.has(term)) score++;
-  }
-
-  return score;
-};
-
-export function rankByScore<T>(
-  items: T[],
-  query: string,
-  toText: (item: T) => string,
-  limit: number
-) {
-  return items
-    .map((item) => ({ item, score: scoreText(query, toText(item)) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
-}
 
 // ---------------------------------------------------------------------------
 // Gemini call helpers
@@ -134,6 +93,17 @@ export type RegimenVariant = {
   rationale: string;
 };
 
+export type Paediatric = {
+  dosing: string[]; // mg/kg and age bands, as reference text
+  age_floor?: string; // "Not for use under 8 years"
+  neonatal_note?: string;
+};
+
+export type PregnancyLactation = {
+  pregnancy: string; // by trimester where it differs
+  lactation: string;
+};
+
 export type Plan = {
   condition: string;
   lines: TreatmentLine[];
@@ -143,6 +113,9 @@ export type Plan = {
   cautions: string[];
   monitoring: string[];
   extended_info: string[];
+  paediatric?: Paediatric;
+  pregnancy_lactation?: PregnancyLactation;
+  adjuncts?: string[];
 };
 
 export const treatmentLineSchema = {
@@ -168,6 +141,27 @@ export const regimenVariantSchema = {
   },
 };
 
+export const paediatricSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["dosing"],
+  properties: {
+    dosing: { type: "array", items: { type: "string" } },
+    age_floor: { type: "string", nullable: true },
+    neonatal_note: { type: "string", nullable: true },
+  },
+};
+
+export const pregnancyLactationSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["pregnancy", "lactation"],
+  properties: {
+    pregnancy: { type: "string" },
+    lactation: { type: "string" },
+  },
+};
+
 export const planSchema = {
   type: "object",
   additionalProperties: false,
@@ -180,6 +174,9 @@ export const planSchema = {
     "cautions",
     "monitoring",
     "extended_info",
+    "paediatric",
+    "pregnancy_lactation",
+    "adjuncts",
   ],
   properties: {
     condition: { type: "string" },
@@ -190,8 +187,19 @@ export const planSchema = {
     cautions: { type: "array", items: { type: "string" } },
     monitoring: { type: "array", items: { type: "string" } },
     extended_info: { type: "array", items: { type: "string" } },
+    paediatric: paediatricSchema,
+    pregnancy_lactation: pregnancyLactationSchema,
+    adjuncts: { type: "array", items: { type: "string" } },
   },
 };
+
+export const LOOKUP_DEPTH_RULES = `
+PAEDIATRIC, PREGNANCY AND ADJUNCT DEPTH (reference text, not a patient calculation):
+- Populate "paediatric.dosing" fully from standard practice: mg/kg per dose, age bands, maximum daily dose. The STG extract does not carry dose schedules, so use established paediatric practice. State weight-based dosing as a RULE ("15 mg/kg/dose, max 500 mg, TDS") — never resolve it into a figure for a particular child.
+- Set "paediatric.age_floor" when the drug or regimen has one ("Not for use under 8 years"), and "neonatal_note" where neonates differ.
+- "pregnancy_lactation.pregnancy" should state trimester-specific guidance where it differs; "lactation" should say whether the regimen is compatible with breastfeeding.
+- "adjuncts" lists the symptomatic cover typically given alongside this treatment (antipyretic, analgesic, antiemetic, ORS/zinc, antihistamine, antispasmodic) — short lines, only those that genuinely apply.
+`;
 
 export const TREATMENT_STRUCTURE_RULES = `
 TREATMENT STRUCTURE RULES (organize by treatment LINE, never by facility level):
@@ -218,38 +226,64 @@ EXTENDED CLINICAL KNOWLEDGE — LEARNING DEEP-DIVE (shown collapsed, expanded on
 
 export const CLINICAL_GROUNDING_RULES = `
 CLINICAL GROUNDING RULES:
-- Treat the supplied Ghana STG/EML records as the first reference when they cover the condition or drug — prefer them when present.
-- When the supplied records are thin, silent, or simply don't cover the case (this is common for STIs, complicated/recurrent UTIs, RTIs, hypertensive emergencies/urgencies, animal and dog bites, less textbook presentations, etc.), do NOT say there isn't enough information and do NOT push the clinician to "confirm in the Ghana STG" — instead answer fully and confidently from established international clinical practice (WHO guidance, Ghana Health Service updates, and mainstream evidence-based guidelines such as US CDC/IDSA or UK NICE), and simply name which tradition a regimen reflects (e.g. "Ghana STG", "WHO", "CDC/IDSA", "standard practice") rather than hedging.
-- Give complete, directly usable pharmacological AND non-pharmacological management for whatever condition or drug is asked about, including complex or specialist-adjacent conditions, rather than deferring or truncating the answer.
-- Never invent a dose/route/frequency/duration that isn't grounded in the supplied source or genuinely standard, citable clinical practice.
-- Clearly distinguish probable from confirmed diagnoses, and flag emergencies, pregnancy concerns, severe disease and dangerous vital signs plainly within the content itself.
-- Do not fabricate patient-specific dose calculations.
-- Do not pad every item with "verify locally" or similar hedges — the application shows one overall safety notice already; your job is the most complete, confident, directly usable clinical answer you can give.
+- Prefer the supplied Ghana STG records when they cover the condition or drug, and name that source.
+- When the supplied records are thin or silent — common for STIs, complicated UTIs, RTIs, hypertensive emergencies, animal bites — answer fully from established international practice (WHO, CDC/IDSA, NICE, standard practice) and name which. Never refuse, and never tell the clinician to go and check the STG themselves.
+- Never invent a dose, route, frequency or duration that is not grounded in the supplied source or genuinely standard practice.
+- Never compute a specific patient's milligram figure. State the rule; the application does the arithmetic.
+- Flag emergencies, pregnancy concerns and dangerous vital signs plainly within the content itself.
+- Do not append "verify locally" to individual items — the page carries one safety notice.
 `;
 
-export type ConditionRecord = {
+// ---------------------------------------------------------------------------
+// Postgres full-text search results (supabase/004_search.sql)
+// ---------------------------------------------------------------------------
+
+export type ConditionHit = {
   id: number;
   condition: string;
-  chapter_number?: string | null;
-  chapter?: string | null;
-  printed_page?: string | null;
-  source_pages?: string | null;
-  symptoms?: string | null;
-  signs?: string | null;
-  investigations?: string | null;
-  treatment?: string | null;
-  referral_criteria?: string | null;
-  section_text?: string | null;
+  symptoms: string | null;
+  signs: string | null;
+  investigations: string | null;
+  treatment: string | null;
+  referral_criteria: string | null;
+  source_pages: string | null;
+  printed_page: string | null;
+  rank: number;
 };
 
-export type MedicationRecord = {
-  id?: number;
+export type MedicationHit = {
+  id: number;
   drug: string;
-  formulation?: string | null;
-  strength?: string | null;
-  level_of_care?: string | null;
-  contraindications?: string | null;
-  cautions?: string | null;
-  eml_page?: string | null;
-  category?: string | null;
+  formulation: string | null;
+  strength: string | null;
+  level_of_care: string | null;
+  contraindications: string | null;
+  cautions: string | null;
+  eml_page: string | null;
+  category: string | null;
+  rank: number;
 };
+
+export const asConditionHits = (data: unknown): ConditionHit[] =>
+  Array.isArray(data) ? (data as ConditionHit[]) : [];
+
+export const asMedicationHits = (data: unknown): MedicationHit[] =>
+  Array.isArray(data) ? (data as MedicationHit[]) : [];
+
+/**
+ * Turns prose (an STG treatment paragraph) into individual search terms.
+ * websearch_to_tsquery ANDs every word in a term, so a whole sentence matches
+ * nothing useful — single salient words are what actually hit the index.
+ */
+export function termsFromText(text: unknown, limit = 12): string[] {
+  return [
+    ...new Set(
+      clean(text)
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, " ")
+        .split(/\s+/)
+        .filter((word) => word.length >= 5)
+    ),
+  ].slice(0, limit);
+}
+

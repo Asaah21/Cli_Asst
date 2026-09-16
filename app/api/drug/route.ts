@@ -3,11 +3,11 @@ import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@/lib/supabase/server";
 import {
   clean,
-  scoreText,
   generateJson,
   getModels,
   isQuotaError,
-  MedicationRecord,
+  asMedicationHits,
+  MedicationHit,
 } from "@/lib/clinical/shared";
 
 type DrugLookupInput = {
@@ -29,11 +29,23 @@ type DrugDose = {
   source: string;
 };
 
+type PaediatricDose = {
+  age_band: string;
+  dose: string;
+  frequency: string;
+  max: string;
+  note?: string;
+};
+
 type DrugLookupResult = {
   drug: string;
   overview: string;
   forms: DrugForm[];
   dosages: DrugDose[];
+  paediatric_dosing: PaediatricDose[];
+  pregnancy_lactation: { pregnancy: string; lactation: string };
+  renal_hepatic: string[];
+  interactions: string[];
   contraindications: string[];
   cautions: string[];
   related_drugs: string[];
@@ -66,6 +78,19 @@ const doseSchema = {
   },
 };
 
+const paediatricDoseSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["age_band", "dose", "frequency", "max"],
+  properties: {
+    age_band: { type: "string" },
+    dose: { type: "string" },
+    frequency: { type: "string" },
+    max: { type: "string" },
+    note: { type: "string", nullable: true },
+  },
+};
+
 const drugLookupSchema = {
   type: "object",
   additionalProperties: false,
@@ -74,6 +99,10 @@ const drugLookupSchema = {
     "overview",
     "forms",
     "dosages",
+    "paediatric_dosing",
+    "pregnancy_lactation",
+    "renal_hepatic",
+    "interactions",
     "contraindications",
     "cautions",
     "related_drugs",
@@ -85,6 +114,18 @@ const drugLookupSchema = {
     overview: { type: "string" },
     forms: { type: "array", items: formSchema },
     dosages: { type: "array", items: doseSchema },
+    paediatric_dosing: { type: "array", items: paediatricDoseSchema },
+    pregnancy_lactation: {
+      type: "object",
+      additionalProperties: false,
+      required: ["pregnancy", "lactation"],
+      properties: {
+        pregnancy: { type: "string" },
+        lactation: { type: "string" },
+      },
+    },
+    renal_hepatic: { type: "array", items: { type: "string" } },
+    interactions: { type: "array", items: { type: "string" } },
     contraindications: { type: "array", items: { type: "string" } },
     cautions: { type: "array", items: { type: "string" } },
     related_drugs: { type: "array", items: { type: "string" } },
@@ -93,7 +134,7 @@ const drugLookupSchema = {
   },
 };
 
-function localDrugFallback(input: DrugLookupInput, matched: MedicationRecord[]): DrugLookupResult {
+function localDrugFallback(input: DrugLookupInput, matched: MedicationHit[]): DrugLookupResult {
   const top = matched[0];
 
   return {
@@ -107,6 +148,10 @@ function localDrugFallback(input: DrugLookupInput, matched: MedicationRecord[]):
       level_of_care: clean(m.level_of_care) || "Not specified",
     })),
     dosages: [],
+    paediatric_dosing: [],
+    pregnancy_lactation: { pregnancy: "", lactation: "" },
+    renal_hepatic: [],
+    interactions: [],
     contraindications: matched.flatMap((m) => (m.contraindications ? [clean(m.contraindications)] : [])).slice(0, 6),
     cautions: matched.flatMap((m) => (m.cautions ? [clean(m.cautions)] : [])).slice(0, 6),
     related_drugs: [],
@@ -150,39 +195,23 @@ export async function POST(req: Request) {
     // 1. Retrieve candidate EML medication records for this drug
     // ---------------------------------------------------------
 
-    const { data: allMedications, error: medicationError } = await supabase
-      .from("medications")
-      .select(
-        [
-          "drug",
-          "formulation",
-          "strength",
-          "level_of_care",
-          "contraindications",
-          "cautions",
-          "eml_page",
-          "category",
-        ].join(",")
-      )
-      .limit(1000);
+    const { data: medicationData, error: medicationError } = await supabase.rpc("search_medications", {
+      terms: [drugQuery],
+      n: 10,
+    });
 
     if (medicationError) {
-      return NextResponse.json({ error: medicationError.message }, { status: 500 });
+      console.error("[drug] search_medications failed:", medicationError);
+      return NextResponse.json(
+        {
+          error:
+            "Medicine search is unavailable — has supabase/004_search.sql been applied to this project?",
+        },
+        { status: 500 }
+      );
     }
 
-    const medications = (allMedications ?? []) as unknown as MedicationRecord[];
-
-    const matched = medications
-      .map((medication) => ({
-        medication,
-        score: scoreText(
-          drugQuery,
-          [medication.drug, medication.formulation, medication.strength, medication.category].join(" ")
-        ),
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 10)
-      .map((x) => x.medication);
+    const matched = asMedicationHits(medicationData);
 
     // ---------------------------------------------------------
     // 2. Single-stage AI lookup for a brief description, forms and dosages
@@ -203,8 +232,15 @@ CLINICAL GROUNDING RULES:
 - Do not pad every entry with "verify locally" — the app already shows one overall safety notice; give the most complete, directly usable answer you can.
 - "related_drugs" should list other supplied EML entries that are therapeutic alternatives or commonly confused/similarly named drugs, if any.
 
+REFERENCE DEPTH (this is a reference tool — fill these substantively, never with one generic line):
+- "paediatric_dosing": one entry per age band the drug is actually dosed by (e.g. "Neonate", "1-5 years", "Over 12 years"), each with dose (state weight-based dosing as a RULE, e.g. "15 mg/kg/dose"), frequency, max, and a note where one matters. There is no patient here — never resolve a rule into a specific figure.
+- "pregnancy_lactation": trimester-specific guidance where it differs, and whether it is compatible with breastfeeding.
+- "renal_hepatic": dose adjustment guidance. Empty array when no adjustment is needed.
+- "interactions": clinically significant interactions only, at most 6.
+- "contraindications" and "cautions": fill both substantively.
+
 EXTENDED CLINICAL KNOWLEDGE — LEARNING DEEP-DIVE (shown collapsed, expanded on click):
-- In "extended_info", give summarized, high-yield teaching bullets — one or two sentences each, not paragraphs: drug class and mechanism of action, common indications, key side effects, important interactions, and patient counselling points.
+- In "extended_info", give summarized, high-yield teaching bullets — one or two sentences each, not paragraphs: drug class and mechanism of action, common indications, key side effects, and patient counselling points.
 - Draw on your general medical knowledge freely here. It is supplementary education, not a source-verified prescription.
 
 DRUG QUERY:
