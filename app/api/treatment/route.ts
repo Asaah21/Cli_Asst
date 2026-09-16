@@ -3,7 +3,6 @@ import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@/lib/supabase/server";
 import {
   clean,
-  scoreText,
   generateJson,
   getModels,
   isQuotaError,
@@ -12,9 +11,12 @@ import {
   TREATMENT_STRUCTURE_RULES,
   REGIMEN_VARIANT_RULES,
   EXTENDED_INFO_RULES,
+  LOOKUP_DEPTH_RULES,
   CLINICAL_GROUNDING_RULES,
-  ConditionRecord,
-  MedicationRecord,
+  asConditionHits,
+  asMedicationHits,
+  termsFromText,
+  ConditionHit,
 } from "@/lib/clinical/shared";
 
 type LookupInput = {
@@ -62,7 +64,7 @@ function buildContextText(input: LookupInput) {
 
 function localLookupFallback(
   input: LookupInput,
-  matchedConditions: ConditionRecord[]
+  matchedConditions: ConditionHit[]
 ): LookupResult {
   const top = matchedConditions[0];
 
@@ -90,6 +92,9 @@ function localLookupFallback(
       cautions: [],
       monitoring: [],
       extended_info: [],
+      paediatric: { dosing: [] },
+      pregnancy_lactation: { pregnancy: "", lactation: "" },
+      adjuncts: [],
     },
     related_conditions: matchedConditions.slice(1, 5).map((c) => c.condition),
     source_notes: [
@@ -131,102 +136,63 @@ export async function POST(req: Request) {
     const contextText = buildContextText(input);
 
     // ---------------------------------------------------------
-    // 1. Retrieve candidate STG conditions matching the free-text query
+    // 1. Retrieve candidate STG conditions (Postgres full-text search)
     // ---------------------------------------------------------
 
-    const { data: allConditions, error: conditionError } = await supabase
-      .from("conditions")
-      .select(
-        [
-          "id",
-          "condition",
-          "chapter_number",
-          "chapter",
-          "printed_page",
-          "source_pages",
-          "symptoms",
-          "signs",
-          "investigations",
-          "treatment",
-          "referral_criteria",
-          "section_text",
-        ].join(",")
-      )
-      .limit(500);
+    const conditionTerms = [...new Set([conditionQuery, ...termsFromText(input.notes, 4)])].slice(0, 8);
+
+    const { data: conditionData, error: conditionError } = await supabase.rpc("search_conditions", {
+      terms: conditionTerms,
+      n: 6,
+    });
 
     if (conditionError) {
-      return NextResponse.json({ error: conditionError.message }, { status: 500 });
+      console.error("[treatment] search_conditions failed:", conditionError);
+      return NextResponse.json(
+        {
+          error:
+            "Guideline search is unavailable — has supabase/004_search.sql been applied to this project?",
+        },
+        { status: 500 }
+      );
     }
 
-    const conditions = (allConditions ?? []) as unknown as ConditionRecord[];
-
-    const matchedConditions = conditions
-      .map((condition) => ({
-        condition,
-        score: scoreText(
-          contextText,
-          [
-            condition.condition,
-            condition.symptoms,
-            condition.signs,
-            condition.investigations,
-            condition.treatment,
-          ].join(" ")
-        ),
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 6)
-      .map((x) => x.condition);
+    const matchedConditions = asConditionHits(conditionData);
 
     // ---------------------------------------------------------
     // 2. Retrieve candidate medications
     // ---------------------------------------------------------
 
-    const { data: allMedications, error: medicationError } = await supabase
-      .from("medications")
-      .select(
-        [
-          "drug",
-          "formulation",
-          "strength",
-          "level_of_care",
-          "contraindications",
-          "cautions",
-          "eml_page",
-          "category",
-        ].join(",")
-      )
-      .in("level_of_care", ["B2", "C"])
-      .limit(1000);
+    const medicationTerms = [
+      ...new Set([
+        conditionQuery,
+        ...matchedConditions.map((hit) => hit.condition),
+        ...matchedConditions.flatMap((hit) => termsFromText(hit.treatment, 8)),
+      ]),
+    ].slice(0, 20);
+
+    const { data: medicationData, error: medicationError } = await supabase.rpc("search_medications", {
+      terms: medicationTerms,
+      n: 30,
+    });
 
     if (medicationError) {
-      return NextResponse.json({ error: medicationError.message }, { status: 500 });
+      console.error("[treatment] search_medications failed:", medicationError);
+      return NextResponse.json(
+        {
+          error:
+            "Medicine search is unavailable — has supabase/004_search.sql been applied to this project?",
+        },
+        { status: 500 }
+      );
     }
 
-    const medications = (allMedications ?? []) as unknown as MedicationRecord[];
-
-    const medicationSearchText = [
-      conditionQuery,
-      ...matchedConditions.map((c) => c.condition),
-      ...matchedConditions.map((c) => c.treatment),
-    ].join(" ");
-
-    const relevantMedications = medications
-      .map((medication) => ({
-        medication,
-        score: scoreText(
-          medicationSearchText,
-          [medication.drug, medication.formulation, medication.strength, medication.category].join(" ")
-        ),
-      }))
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 40)
-      .map((x) => x.medication);
+    const relevantMedications = asMedicationHits(medicationData);
 
     const conditionEvidence = matchedConditions.map((c) => ({
       id: c.id,
       condition: c.condition,
+      printed_page: c.printed_page,
       symptoms: c.symptoms,
       signs: c.signs,
       investigations: c.investigations,
@@ -246,6 +212,7 @@ You are a clinical decision-support assistant for a Ghanaian health facility.
 A clinician has typed a condition/diagnosis directly and wants its treatment WITHOUT going through a full patient assessment first. Answer for the condition actually named — do not substitute a "closest match" from the supplied records when the named condition is a real, specific diagnosis (e.g. a specific STI, a complicated UTI, a hypertensive emergency, a dog bite) that the local database simply doesn't carry; answer it properly from general clinical knowledge instead. Use the optional patient context only to flag relevant cautions (e.g. pregnancy, allergy, age-specific dosing notes) — do not re-diagnose the patient. Only fall back to a related "closest match" when the query is too vague or garbled to identify a real condition, and say so plainly in "overview". List genuinely related differentials or conditions worth distinguishing from in "related_conditions".
 ${TREATMENT_STRUCTURE_RULES}
 ${REGIMEN_VARIANT_RULES}
+${LOOKUP_DEPTH_RULES}
 ${CLINICAL_GROUNDING_RULES}
 ${EXTENDED_INFO_RULES}
 

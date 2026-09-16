@@ -16,6 +16,17 @@ export type RegimenVariant = {
   rationale: string;
 };
 
+export type Paediatric = {
+  dosing: string[];
+  age_floor?: string;
+  neonatal_note?: string;
+};
+
+export type PregnancyLactation = {
+  pregnancy: string;
+  lactation: string;
+};
+
 export type Plan = {
   condition: string;
   lines: TreatmentLine[];
@@ -25,6 +36,9 @@ export type Plan = {
   cautions: string[];
   monitoring: string[];
   extended_info: string[];
+  paediatric?: Paediatric;
+  pregnancy_lactation?: PregnancyLactation;
+  adjuncts?: string[];
 };
 
 function lineTone(order: number) {
@@ -158,6 +172,54 @@ export const TreatmentPlan = forwardRef<
               </div>
             )}
           </div>
+
+          {(plan.paediatric?.dosing?.length ||
+            plan.paediatric?.age_floor ||
+            plan.paediatric?.neonatal_note) && (
+            <div className="referenceBlock">
+              <h5>Paediatric dosing</h5>
+              {plan.paediatric.dosing?.length > 0 && (
+                <ul className="cleanList">
+                  {plan.paediatric.dosing.map((item, j) => (
+                    <li key={j}>{item}</li>
+                  ))}
+                </ul>
+              )}
+              {plan.paediatric.age_floor && (
+                <p className="lineWhen">{plan.paediatric.age_floor}</p>
+              )}
+              {plan.paediatric.neonatal_note && (
+                <p className="lineWhen">Neonates: {plan.paediatric.neonatal_note}</p>
+              )}
+            </div>
+          )}
+
+          {(plan.pregnancy_lactation?.pregnancy || plan.pregnancy_lactation?.lactation) && (
+            <div className="referenceBlock">
+              <h5>Pregnancy &amp; lactation</h5>
+              {plan.pregnancy_lactation.pregnancy && (
+                <p>
+                  <strong>Pregnancy:</strong> {plan.pregnancy_lactation.pregnancy}
+                </p>
+              )}
+              {plan.pregnancy_lactation.lactation && (
+                <p>
+                  <strong>Lactation:</strong> {plan.pregnancy_lactation.lactation}
+                </p>
+              )}
+            </div>
+          )}
+
+          {plan.adjuncts && plan.adjuncts.length > 0 && (
+            <div className="referenceBlock">
+              <h5>Symptomatic cover</h5>
+              <ul className="cleanList">
+                {plan.adjuncts.map((item, j) => (
+                  <li key={j}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {plan.extended_info?.length > 0 && (
             <div className="extendedInfoBlock">

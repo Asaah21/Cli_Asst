@@ -17,11 +17,23 @@ type DrugDose = {
   source: string;
 };
 
+type PaediatricDose = {
+  age_band: string;
+  dose: string;
+  frequency: string;
+  max: string;
+  note?: string;
+};
+
 type DrugLookupResult = {
   drug: string;
   overview: string;
   forms: DrugForm[];
   dosages: DrugDose[];
+  paediatric_dosing?: PaediatricDose[];
+  pregnancy_lactation?: { pregnancy: string; lactation: string };
+  renal_hepatic?: string[];
+  interactions?: string[];
   contraindications: string[];
   cautions: string[];
   related_drugs: string[];
@@ -151,7 +163,64 @@ export default function DrugLookup() {
             </div>
           )}
 
+          {result.paediatric_dosing && result.paediatric_dosing.length > 0 && (
+            <div>
+              <h5>Paediatric dosing</h5>
+              <div className="lineList">
+                {result.paediatric_dosing.map((band, i) => (
+                  <div className="lineBox lineOther" key={i}>
+                    <div className="lineLabel">{band.age_band}</div>
+                    <ul className="cleanList">
+                      <li>
+                        {band.dose}
+                        {band.frequency ? ` · ${band.frequency}` : ""}
+                        {band.max ? ` · max ${band.max}` : ""}
+                      </li>
+                    </ul>
+                    {band.note && <p className="lineWhen">{band.note}</p>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(result.pregnancy_lactation?.pregnancy || result.pregnancy_lactation?.lactation) && (
+            <div className="referenceBlock">
+              <h5>Pregnancy &amp; lactation</h5>
+              {result.pregnancy_lactation.pregnancy && (
+                <p>
+                  <strong>Pregnancy:</strong> {result.pregnancy_lactation.pregnancy}
+                </p>
+              )}
+              {result.pregnancy_lactation.lactation && (
+                <p>
+                  <strong>Lactation:</strong> {result.pregnancy_lactation.lactation}
+                </p>
+              )}
+            </div>
+          )}
+
           <div className="miniGrid">
+            {result.renal_hepatic && result.renal_hepatic.length > 0 && (
+              <div>
+                <h5>Renal / hepatic adjustment</h5>
+                <ul className="cleanList">
+                  {result.renal_hepatic.map((item, i) => (
+                    <li key={i}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {result.interactions && result.interactions.length > 0 && (
+              <div>
+                <h5>Interactions</h5>
+                <ul className="cleanList">
+                  {result.interactions.map((item, i) => (
+                    <li key={i}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {result.contraindications?.length > 0 && (
               <div>
                 <h5>Contraindications</h5>
